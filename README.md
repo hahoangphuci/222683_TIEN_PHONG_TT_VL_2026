@@ -125,6 +125,27 @@ OCR_LANGS_DEFAULT=eng+vie
 
 Nếu OCR báo thiếu ngôn ngữ `vie`, hãy đảm bảo language data tiếng Việt được cài kèm trong Tesseract.
 
+## 📄 Cấu hình PDF (giữ định dạng)
+
+PDF rất khó “giữ nguyên định dạng gốc” tuyệt đối khi dịch (đặc biệt với bảng/form). Backend có một số biến môi trường để ưu tiên **giữ layout** và giảm lỗi “chồng chữ”.
+
+Chỉnh trong `backend/.env`:
+
+```env
+# Mặc định: dịch cả bảng (ưu tiên "dịch toàn bộ") và cố gắng fit text trong đúng ô
+# Values: skip | safe | force
+# - force: dịch nhiều nhất (có thể chữ nhỏ hơn trong ô hẹp)
+# - safe : chỉ thay thế khi fit tốt (giữ layout tối đa, nhưng có thể bỏ qua vài ô)
+# - skip : không dịch các ô bảng/form (giữ layout tuyệt đối)
+PDF_TABLE_MODE=force
+
+# Chặn chế độ bilingual "newline" cho PDF để tránh chồng chữ (mặc định backend tự chặn)
+PDF_ALLOW_NEWLINE_MODE=0
+
+# Strict mode: ưu tiên giữ layout, có thể bỏ qua nhiều dòng khó thay thế
+PDF_STRICT_PRESERVE=0
+```
+
 ## 🔧 Cấu Hình API Keys
 
 Chỉnh sửa file `backend/.env`:

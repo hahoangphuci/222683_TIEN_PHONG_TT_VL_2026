@@ -2,8 +2,10 @@ import os
 from dotenv import load_dotenv
 
 # Load .env từ thư mục backend (config.py nằm trong backend/)
-# override=True so edits to backend/.env take effect even if variables exist in OS env
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'), override=True)
+# IMPORTANT: In Docker, environment variables (e.g. DATABASE_URL) should win.
+# Set DOTENV_OVERRIDE=1 only if you explicitly want backend/.env to override existing env vars.
+_override = (os.getenv('DOTENV_OVERRIDE') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'), override=_override)
 
 class Config:
     SECRET_KEY = os.getenv('SECRET_KEY', 'dev-secret-key')
@@ -26,6 +28,7 @@ class Config:
     OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
     AI_PROVIDER = os.getenv('AI_PROVIDER', 'openrouter')
     AI_MODEL = os.getenv('AI_MODEL', 'nvidia/nemotron-3-nano-30b-a3b:free')
+    AI_VISION_MODEL = os.getenv('AI_VISION_MODEL', '')  # Vision-capable model for OCR (auto-detect if empty)
     AI_AVAILABLE_MODELS = os.getenv('AI_AVAILABLE_MODELS', '')
     AI_ENDPOINTS = {
         'chat': os.getenv('AI_ENDPOINT_CHAT'),

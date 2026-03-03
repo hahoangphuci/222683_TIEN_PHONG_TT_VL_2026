@@ -7,6 +7,8 @@ services:
       - "5000:5000"
     environment:
       - FLASK_ENV=development
+      - DATABASE_URL=mysql+pymysql://root:rootpassword@db:3306/ai_translation
+      - FRONTEND_URL=http://localhost
     volumes:
       - ./backend/uploads:/app/uploads
       - ./backend/downloads:/app/downloads
@@ -28,14 +30,12 @@ services:
     image: mysql:8.0
     environment:
       MYSQL_ROOT_PASSWORD: rootpassword
-      MYSQL_DATABASE: translation_db
-      MYSQL_USER: translator
-      MYSQL_PASSWORD: translator123
+      MYSQL_DATABASE: ai_translation
     ports:
       - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
-      - ./backend/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+      - ./backend/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
     networks:
       - app-network
 

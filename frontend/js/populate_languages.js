@@ -11,6 +11,11 @@
     if (!window.LANGUAGES) return;
     const selects = document.querySelectorAll("select.lang-select");
     selects.forEach((sel) => {
+      // Some selects use the same styling but have fixed (non-language) options.
+      // Example: DOCX OCR mode selector.
+      if (sel.dataset && sel.dataset.staticOptions === "true") {
+        return;
+      }
       // preserve current value
       const cur = sel.value;
       // clear existing

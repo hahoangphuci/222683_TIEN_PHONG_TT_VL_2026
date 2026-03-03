@@ -1,10 +1,14 @@
 import os
+import sys
+import importlib.util
 from dotenv import load_dotenv
 
 # Load .env từ thư mục backend (nơi có run.py) – bắt buộc trước khi import config hoặc TranslationService
 _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
-# override=True so changes in backend/.env take effect even if the variable already exists in OS env
-load_dotenv(_env_path, override=True)
+# IMPORTANT: In Docker, environment variables should win (DATABASE_URL, etc).
+# Set DOTENV_OVERRIDE=1 only if you explicitly want backend/.env to override existing env vars.
+_override = (os.getenv('DOTENV_OVERRIDE') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+load_dotenv(_env_path, override=_override)
 
 from flask import Flask, send_from_directory, jsonify
 from flask_cors import CORS
@@ -30,6 +34,19 @@ app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-pro
 
 # Load config
 app.config.from_object('config.DevelopmentConfig')
+
+# Preflight: if MySQL URI uses PyMySQL, ensure the driver is installed.
+# This avoids a long SQLAlchemy traceback when the wrong interpreter/env is used.
+_db_uri = (app.config.get('SQLALCHEMY_DATABASE_URI') or '').lower()
+if 'mysql+pymysql://' in _db_uri and importlib.util.find_spec('pymysql') is None:
+    print("\n[ERROR] Missing dependency: 'pymysql' (PyMySQL).")
+    print("Your DATABASE_URL/SQLALCHEMY_DATABASE_URI uses 'mysql+pymysql://',")
+    print("but this Python environment does not have PyMySQL installed.")
+    print("\nFix (run in the SAME interpreter you're using to start the app):")
+    print("  python -m pip install PyMySQL")
+    print("  # or")
+    print("  python -m pip install -r backend/requirements.txt")
+    raise SystemExit(1)
 
 # Initialize extensions
 from app.models import db

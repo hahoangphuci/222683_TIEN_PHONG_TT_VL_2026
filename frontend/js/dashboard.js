@@ -924,17 +924,25 @@ class FileUploadManager {
 
     if (!fileInput || !uploadArea) return;
 
+    // OCR mode dropdown is only relevant when OCR-in-images is enabled for DOCX
+    const ocrToggle = document.getElementById("uploadDocxOcrImages");
+    const ocrModeSel = document.getElementById("uploadDocxOcrMode");
+    const syncOcrModeEnabled = () => {
+      if (!ocrModeSel) return;
+      const enabled = !!(ocrToggle && ocrToggle.checked);
+      ocrModeSel.disabled = !enabled;
+    };
+    syncOcrModeEnabled();
+    if (ocrToggle) ocrToggle.addEventListener("change", syncOcrModeEnabled);
+
     // Click to select file
     uploadArea.addEventListener("click", (e) => {
-      // Only trigger file input if clicking on the area itself, not on buttons
-      if (
-        e.target === uploadArea ||
-        e.target.closest(".upload-icon") ||
-        e.target.tagName === "H3" ||
-        e.target.tagName === "P"
-      ) {
-        fileInput.click();
-      }
+      // Open picker for most clicks inside upload area.
+      // Reset input value first so selecting the same file still triggers change.
+      const t = e.target;
+      if (t && t.id === "fileInput") return;
+      fileInput.value = "";
+      fileInput.click();
     });
 
     // Drag and drop (optional enhancement)
@@ -971,9 +979,14 @@ class FileUploadManager {
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       "text/plain",
     ];
+    const allowedExts = [".pdf", ".docx", ".xlsx", ".txt"];
     const maxSize = 50 * 1024 * 1024; // 50MB
 
-    if (!allowedTypes.includes(file.type)) {
+    const fileName = String((file && file.name) || "").toLowerCase();
+    const extOk = allowedExts.some((ext) => fileName.endsWith(ext));
+    const typeOk = allowedTypes.includes(String(file.type || "").toLowerCase());
+
+    if (!typeOk && !extOk) {
       UIManager.showAlert(
         "Định dạng file không được hỗ trợ. Chỉ chấp nhận PDF, Word, Excel, Text.",
       );
@@ -997,6 +1010,37 @@ class FileUploadManager {
     fileSize.textContent = `(${(file.size / 1024 / 1024).toFixed(2)} MB)`;
     fileInfo.style.display = "block";
     this.selectedFile = file;
+
+    // Auto-enable OCR checkbox for DOCX files only.
+    // For PDF, keep user's current choice to avoid unexpected OCR appendix pages.
+    try {
+      const ocrToggle = document.getElementById("uploadDocxOcrImages");
+      if (ocrToggle) {
+        const name = String(file.name || "").toLowerCase();
+        const type = String(file.type || "").toLowerCase();
+        const isDocx =
+          type ===
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+          name.endsWith(".docx") ||
+          false;
+        const isPdf = type === "application/pdf" || name.endsWith(".pdf");
+        const bilingualSel = document.getElementById("uploadBilingualMode");
+        if (isDocx) {
+          ocrToggle.checked = true;
+          // Trigger change event to sync OCR mode dropdown
+          ocrToggle.dispatchEvent(new Event("change"));
+        } else if (isPdf) {
+          // For PDF, keep user's current OCR choice (some PDFs are scanned and need OCR).
+          // Still force normal replacement mode to avoid translation text overlapping existing lines.
+          ocrToggle.dispatchEvent(new Event("change"));
+          if (bilingualSel) {
+            bilingualSel.value = "none";
+          }
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
   }
 
   async uploadDocument() {
@@ -1023,17 +1067,47 @@ class FileUploadManager {
     formData.append("file", this.selectedFile);
     formData.append("target_lang", targetLang);
 
-    // Optional: OCR images embedded in Word (.docx)
+    // Optional: OCR images embedded in Word (.docx) or PDF
     try {
       const ocrToggle = document.getElementById("uploadDocxOcrImages");
+      const ocrModeSel = document.getElementById("uploadDocxOcrMode");
       const isDocx =
         (this.selectedFile &&
           (this.selectedFile.type ===
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
-            String(this.selectedFile.name || "").toLowerCase().endsWith(".docx"))) ||
+            String(this.selectedFile.name || "")
+              .toLowerCase()
+              .endsWith(".docx"))) ||
         false;
-      if (ocrToggle && ocrToggle.checked && isDocx) {
+      const isPdf =
+        (this.selectedFile &&
+          (this.selectedFile.type === "application/pdf" ||
+            String(this.selectedFile.name || "")
+              .toLowerCase()
+              .endsWith(".pdf"))) ||
+        false;
+      if (ocrToggle && ocrToggle.checked && (isDocx || isPdf)) {
         formData.append("ocr_images", "1");
+        const mode = (ocrModeSel && ocrModeSel.value) || "image";
+        formData.append("ocr_mode", mode);
+      }
+    } catch (e) {
+      // ignore
+    }
+
+    // Bilingual mode
+    try {
+      const bilingualSel = document.getElementById("uploadBilingualMode");
+      if (bilingualSel && bilingualSel.value && bilingualSel.value !== "none") {
+        formData.append("bilingual_mode", bilingualSel.value);
+
+        // Inline bilingual delimiter: "Original <delim> Translated"
+        if (bilingualSel.value === "inline") {
+          const delimSel = document.getElementById("uploadBilingualDelimiter");
+          if (delimSel && delimSel.value) {
+            formData.append("bilingual_delimiter", delimSel.value);
+          }
+        }
       }
     } catch (e) {
       // ignore
@@ -1105,7 +1179,34 @@ class FileUploadManager {
                 }, 500);
               }
 
-              UIManager.showSuccess("Tệp đã được dịch xong!");
+              // OCR text is now inserted directly into the DOCX — no separate sidecar file.
+
+              // Surface DOCX OCR image processing summary (if enabled on backend)
+              try {
+                if (statusData.ocr_summary) {
+                  UIManager.showNotification(
+                    String(statusData.ocr_summary),
+                    "info",
+                  );
+                }
+                if (statusData.ocr_skipped) {
+                  // Example: missing Tesseract; show as error-style notification
+                  UIManager.showNotification(
+                    String(statusData.ocr_skipped),
+                    "error",
+                  );
+                }
+              } catch (e) {
+                // ignore
+              }
+
+              // Success message (include OCR summary if present so it's visible even if notification hides)
+              const suffix = statusData.ocr_summary
+                ? ` (${String(statusData.ocr_summary)})`
+                : statusData.ocr_skipped
+                  ? ` (${String(statusData.ocr_skipped)})`
+                  : "";
+              UIManager.showSuccess(`Tệp đã được dịch xong!${suffix}`);
               document.getElementById("uploadProgress").style.display = "none";
 
               // Reload stats and history
@@ -1115,10 +1216,19 @@ class FileUploadManager {
 
             if (statusData.status === "failed") {
               clearInterval(interval);
-              UIManager.showError(
-                statusData.error || "Đã có lỗi khi xử lý file",
-              );
-              document.getElementById("uploadProgress").style.display = "none";
+              const errMsg = statusData.error || "Đã có lỗi khi xử lý file";
+              UIManager.showError(errMsg);
+              // Show error in progress bar area instead of hiding it
+              progressFill.style.width = "100%";
+              progressFill.style.backgroundColor = "#e74c3c";
+              progressText.textContent = `Lỗi: ${errMsg}`;
+              progressPercent.textContent = "❌";
+              // Auto-hide after 8 seconds
+              setTimeout(() => {
+                document.getElementById("uploadProgress").style.display =
+                  "none";
+                progressFill.style.backgroundColor = "";
+              }, 8000);
             }
           } catch (err) {
             console.error("Status polling error", err);
@@ -1179,6 +1289,17 @@ class ImageOcrManager {
     const imageInput = document.getElementById("imageInput");
     const imageArea = document.getElementById("imageUploadArea");
     if (!imageInput || !imageArea) return;
+
+    const modeToggle = document.getElementById("imageRenderOverlay");
+    const modeLabel = document.getElementById("imageModeLabel");
+    const updateModeLabel = () => {
+      if (!modeToggle || !modeLabel) return;
+      modeLabel.textContent = modeToggle.checked
+        ? "Dùng cách 2 (Giữ ảnh): Trả ảnh đã thay chữ (beta)"
+        : "Dùng cách 1 (OCR): Trả văn bản để copy/chỉnh sửa";
+    };
+    updateModeLabel();
+    if (modeToggle) modeToggle.addEventListener("change", updateModeLabel);
 
     const isOcrTabActive = () => {
       const imageTab = document.getElementById("image-tab");

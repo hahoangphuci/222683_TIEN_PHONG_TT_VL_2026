@@ -387,6 +387,88 @@
           <div id="image-tab" class="tab-content">
             <div class="upload-section">
               <h2>Dịch từ hình ảnh (OCR)</h2>
+
+              <div
+                class="quick-compare glassmorphism"
+                aria-label="So sánh nhanh phương pháp dịch ảnh"
+              >
+                <div class="quick-compare-title">
+                  <i class="fas fa-chart-bar" aria-hidden="true"></i>
+                  <span>So sánh nhanh</span>
+                </div>
+                <table class="compare-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">Trường hợp</th>
+                      <th scope="col">Dùng cách 1 (OCR)</th>
+                      <th scope="col">Dùng cách 2 (Giữ ảnh)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>Tài liệu học tập</td>
+                      <td class="compare-center">
+                        <i class="fas fa-check compare-ok" aria-label="Có"></i>
+                      </td>
+                      <td class="compare-center">
+                        <i
+                          class="fas fa-xmark compare-no"
+                          aria-label="Không"
+                        ></i>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td>Scan sách</td>
+                      <td class="compare-center">
+                        <i class="fas fa-check compare-ok" aria-label="Có"></i>
+                      </td>
+                      <td class="compare-center">
+                        <i
+                          class="fas fa-xmark compare-no"
+                          aria-label="Không"
+                        ></i>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td>Poster quảng cáo</td>
+                      <td class="compare-center">
+                        <i
+                          class="fas fa-xmark compare-no"
+                          aria-label="Không"
+                        ></i>
+                      </td>
+                      <td class="compare-center">
+                        <i class="fas fa-check compare-ok" aria-label="Có"></i>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td>Cần chỉnh sửa nội dung</td>
+                      <td class="compare-center">
+                        <i class="fas fa-check compare-ok" aria-label="Có"></i>
+                      </td>
+                      <td class="compare-center">
+                        <i
+                          class="fas fa-xmark compare-no"
+                          aria-label="Không"
+                        ></i>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td>Cần giữ thiết kế gốc</td>
+                      <td class="compare-center">
+                        <i
+                          class="fas fa-xmark compare-no"
+                          aria-label="Không"
+                        ></i>
+                      </td>
+                      <td class="compare-center">
+                        <i class="fas fa-check compare-ok" aria-label="Có"></i>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
               <div
                 class="upload-area glassmorphism"
                 id="imageUploadArea"
@@ -449,10 +531,12 @@
                   >
                     <label
                       class="toggle small"
-                      title="Beta: thay chữ dịch lên ảnh (không hoàn hảo cho mọi font/khung chữ)."
+                      title="Cách 2 (Giữ ảnh) sẽ trả về ảnh đã thay chữ. Cách 1 (OCR) chỉ trả văn bản để bạn copy/chỉnh sửa."
                     >
                       <input type="checkbox" id="imageRenderOverlay" checked />
-                      <span>Trả ảnh đã thay chữ (beta)</span>
+                      <span id="imageModeLabel"
+                        >Dùng cách 2 (Giữ ảnh): Trả ảnh đã thay chữ (beta)</span
+                      >
                     </label>
 
                     <button
@@ -548,10 +632,7 @@
           <div id="upload-tab" class="tab-content">
             <div class="upload-section">
               <h2>Upload Tài Liệu</h2>
-              <div
-                class="upload-area glassmorphism"
-                onclick="document.getElementById('fileInput').click()"
-              >
+              <div class="upload-area glassmorphism">
                 <div class="upload-icon">
                   <i class="fas fa-cloud-upload-alt"></i>
                 </div>
@@ -592,11 +673,56 @@
                   ></select>
                   <label
                     class="toggle small"
-                    title="Chỉ áp dụng cho Word (.docx). Cần cài Tesseract OCR trên máy chủ để OCR hoạt động."
+                    title="Áp dụng cho Word (.docx) và PDF. Dùng AI Vision hoặc Tesseract OCR để đọc chữ trong ảnh."
                   >
-                    <input type="checkbox" id="uploadDocxOcrImages" />
-                    <span>Dịch chữ trong ảnh (Word)</span>
+                    <input type="checkbox" id="uploadDocxOcrImages" checked />
+                    <span>Dịch chữ trong ảnh (Word, PDF)</span>
                   </label>
+                  <select
+                    id="uploadDocxOcrMode"
+                    class="lang-select"
+                    title="Chọn cách xử lý chữ trong ảnh khi dịch Word (.docx) hoặc PDF"
+                    data-static-options="true"
+                  >
+                    <option value="auto">
+                      Tự động (AI chọn theo từng ảnh)
+                    </option>
+                    <option value="image" selected>
+                      Chữ lên ảnh: thay chữ trực tiếp lên ảnh
+                    </option>
+                    <option value="text">
+                      Chữ văn bản: thay ảnh bằng văn bản dịch
+                    </option>
+                    <option value="both">
+                      Cả 2: vừa thay chữ lên ảnh vừa thêm văn bản
+                    </option>
+                  </select>
+                  <select
+                    id="uploadBilingualMode"
+                    class="lang-select"
+                    title="Chế độ song ngữ: giữ nguyên bản gốc bên cạnh bản dịch"
+                    data-static-options="true"
+                  >
+                    <option value="none" selected>
+                      Dịch thường (chỉ bản dịch)
+                    </option>
+                    <option value="inline">
+                      Song ngữ liền kề (Gốc | Dịch)
+                    </option>
+                    <option value="newline">Song ngữ xuống dòng</option>
+                  </select>
+                  <select
+                    id="uploadBilingualDelimiter"
+                    class="lang-select"
+                    title="Dấu ngăn cách khi chọn Song ngữ liền kề (Gốc <dấu> Dịch)"
+                    data-static-options="true"
+                  >
+                    <option value="|" selected>|</option>
+                    <option value=":">:</option>
+                    <option value="/">/</option>
+                    <option value="&#92;">&#92;</option>
+                    <option value="-">-</option>
+                  </select>
                   <button
                     id="uploadBtn"
                     class="btn-primary"

@@ -15,8 +15,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 from dotenv import load_dotenv
 
 # Load .env
-# override=True so backend/.env edits are respected
-load_dotenv(os.path.join(os.path.dirname(__file__), '.env'), override=True)
+# IMPORTANT: In Docker, environment variables should win.
+# Set DOTENV_OVERRIDE=1 only if you explicitly want backend/.env to override existing env vars.
+_override = (os.getenv('DOTENV_OVERRIDE') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+load_dotenv(os.path.join(os.path.dirname(__file__), '.env'), override=_override)
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import OperationalError

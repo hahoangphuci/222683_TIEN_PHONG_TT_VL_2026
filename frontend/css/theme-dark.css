@@ -65,19 +65,25 @@ nav.navbar,
   bottom: 0;
   height: 220px;
   z-index: 1;
-  background: linear-gradient(to bottom, rgba(11,28,36,0) 0%, rgba(11,15,26,1) 100%);
+  background: linear-gradient(
+    to bottom,
+    rgba(11, 28, 36, 0) 0%,
+    rgba(11, 15, 26, 1) 100%
+  );
   pointer-events: none;
 }
-.page-hero > * { z-index: 2; }
+.page-hero > * {
+  z-index: 2;
+}
 
 /* Dashboard: keep hero plain (no gradient) */
 .dashboard.page-hero::before,
 .dashboard.page-hero::after {
   display: none;
 }
-.dashboard.page-hero { background: transparent; }
-
-
+.dashboard.page-hero {
+  background: transparent;
+}
 
 .card,
 .panel,
