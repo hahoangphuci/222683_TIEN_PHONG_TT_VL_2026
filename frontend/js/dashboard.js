@@ -1035,6 +1035,7 @@ class FileUploadManager {
           ocrToggle.dispatchEvent(new Event("change"));
           if (bilingualSel) {
             bilingualSel.value = "none";
+            bilingualSel.dispatchEvent(new Event("change"));
           }
         }
       }
@@ -1290,16 +1291,18 @@ class ImageOcrManager {
     const imageArea = document.getElementById("imageUploadArea");
     if (!imageInput || !imageArea) return;
 
-    const modeToggle = document.getElementById("imageRenderOverlay");
+    const modeSel = document.getElementById("imageOutputMode");
     const modeLabel = document.getElementById("imageModeLabel");
     const updateModeLabel = () => {
-      if (!modeToggle || !modeLabel) return;
-      modeLabel.textContent = modeToggle.checked
-        ? "Dùng cách 2 (Giữ ảnh): Trả ảnh đã thay chữ (beta)"
-        : "Dùng cách 1 (OCR): Trả văn bản để copy/chỉnh sửa";
+      if (!modeSel || !modeLabel) return;
+      const v = String(modeSel.value || "auto").toLowerCase();
+      if (v === "text") modeLabel.textContent = "Chế độ: Văn bản";
+      else if (v === "image") modeLabel.textContent = "Chế độ: Ảnh";
+      else if (v === "both") modeLabel.textContent = "Chế độ: Ảnh + Văn bản";
+      else modeLabel.textContent = "Chế độ: Tự động";
     };
     updateModeLabel();
-    if (modeToggle) modeToggle.addEventListener("change", updateModeLabel);
+    if (modeSel) modeSel.addEventListener("change", updateModeLabel);
 
     const isOcrTabActive = () => {
       const imageTab = document.getElementById("image-tab");
@@ -1465,6 +1468,8 @@ class ImageOcrManager {
     const ocrText = document.getElementById("imageOcrText");
     const translatedText = document.getElementById("imageTranslatedText");
     const translatedPreview = document.getElementById("imageTranslatedPreview");
+    const textResultWrap = document.getElementById("imageTextResult");
+    const modeSel = document.getElementById("imageOutputMode");
     const downloadBtn = document.getElementById("imageDownloadBtn");
     const err = document.getElementById("imageError");
     if (err) err.style.display = "none";
@@ -1480,6 +1485,11 @@ class ImageOcrManager {
     }
     if (ocrText) ocrText.value = "";
     if (translatedText) translatedText.value = "";
+    if (textResultWrap) textResultWrap.style.display = "grid";
+    if (modeSel) {
+      modeSel.value = "auto";
+      modeSel.dispatchEvent(new Event("change"));
+    }
     if (downloadBtn) downloadBtn.style.display = "none";
     if (result) result.style.display = "none";
     if (this.objectUrl) {
@@ -1526,9 +1536,9 @@ class ImageOcrManager {
     formData.append("file", this.selectedImage);
     formData.append("source_lang", sourceLang);
     formData.append("target_lang", targetLang);
-    const renderToggle = document.getElementById("imageRenderOverlay");
-    const renderOverlay = !!(renderToggle && renderToggle.checked);
-    formData.append("render", renderOverlay ? "1" : "0");
+    const modeSel = document.getElementById("imageOutputMode");
+    const mode = String((modeSel && modeSel.value) || "auto").toLowerCase();
+    formData.append("mode", mode);
 
     try {
       const resp = await fetch("/api/translation/image", {
@@ -1553,6 +1563,12 @@ class ImageOcrManager {
 
       if (ocrText) ocrText.value = data.ocr_text || "";
       if (translatedText) translatedText.value = data.translated_text || "";
+
+      const textResultWrap = document.getElementById("imageTextResult");
+      const selectedMode = String(data.mode || mode || "auto").toLowerCase();
+      const showText = selectedMode !== "image";
+      if (textResultWrap)
+        textResultWrap.style.display = showText ? "grid" : "none";
 
       this.renderedImageDataUrl = data.rendered_image || null;
       if (translatedPreview) {
@@ -1863,6 +1879,28 @@ class DashboardController {
       if (clearFileBtn) {
         clearFileBtn.addEventListener("click", () => this.upload.resetUpload());
       }
+
+      // Bilingual delimiter should only appear for inline mode
+      const uploadBilingualModeSel = document.getElementById(
+        "uploadBilingualMode",
+      );
+      const uploadDelimiterWrap = document.querySelector(
+        ".upload-controls--document .upload-bilingual-delimiter",
+      );
+      const syncUploadDelimiter = () => {
+        if (!uploadDelimiterWrap) return;
+        const isInline =
+          uploadBilingualModeSel && uploadBilingualModeSel.value === "inline";
+        uploadDelimiterWrap.classList.toggle("is-visible", Boolean(isInline));
+        uploadDelimiterWrap.setAttribute(
+          "aria-hidden",
+          isInline ? "false" : "true",
+        );
+      };
+      if (uploadBilingualModeSel) {
+        uploadBilingualModeSel.addEventListener("change", syncUploadDelimiter);
+      }
+      syncUploadDelimiter();
     } catch (err) {
       console.error("setupEventListeners error:", err);
     }

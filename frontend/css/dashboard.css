@@ -599,6 +599,22 @@
   height: 16px;
 }
 
+.image-output-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.9);
+  font-weight: 600;
+}
+
+.image-output-mode #imageModeLabel {
+  white-space: nowrap;
+}
+
 /* Align translate button to right and keep it fixed at bottom-right of editor pane */
 .editor-actions {
   margin-top: 14px;
@@ -991,15 +1007,70 @@
   display: flex;
   gap: 15px;
   align-items: center;
+  flex-wrap: wrap;
+}
+
+.upload-controls--document {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+.upload-controls__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.upload-controls--document .upload-controls__row--actions {
+  justify-content: flex-end;
 }
 
 .upload-controls select {
-  flex: 1;
-  padding: 10px 15px;
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.1);
-  color: white;
+  flex: 0 1 260px;
+  min-width: 200px;
+  padding: 10px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.95);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.upload-controls select:focus {
+  outline: none;
+  border-color: rgba(102, 126, 234, 0.9);
+  box-shadow: 0 6px 20px rgba(102, 126, 234, 0.12);
+}
+
+.upload-bilingual-delimiter {
+  display: none;
+}
+
+.upload-bilingual-delimiter.is-visible {
+  display: block;
+}
+
+.upload-controls .toggle.small {
+  flex: 0 1 auto;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.upload-controls .btn-primary,
+.upload-controls .btn-secondary {
+  white-space: nowrap;
+}
+
+.upload-controls .btn-primary {
+  min-width: 160px;
 }
 
 .upload-progress {
@@ -1042,11 +1113,23 @@
   }
 
   .upload-controls {
-    flex-direction: column;
+    gap: 10px;
   }
 
-  .upload-controls select {
+  .upload-controls__row {
+    gap: 10px;
+  }
+
+  .upload-controls--document .upload-controls__row--actions {
+    justify-content: stretch;
+  }
+
+  .upload-controls select,
+  .upload-controls .toggle.small,
+  .upload-controls .btn-primary,
+  .upload-controls .btn-secondary {
     width: 100%;
+    min-width: 0;
   }
 
   .history-item {
@@ -1244,7 +1327,6 @@
   }
 
   .upload-controls {
-    flex-direction: column;
     gap: 15px;
   }
 

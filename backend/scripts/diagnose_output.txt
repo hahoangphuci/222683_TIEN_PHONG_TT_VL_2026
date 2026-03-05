@@ -1,0 +1,38 @@
+File: uploads/testfile.pdf
+HAS_PYMUPDF4LLM: False
+Pages: 2
+
+=== Page 1: 14 blocks | 0 layout-skip | 2 image-skip ===
+  [OK] blk#0 | 'KHOA CÔNG NGHỆTHÔNG TIN'
+  [OK] blk#1 | 'Gửi lại phiếu đăng ký qua Email: ttthao@nctu.edu.vn'
+  [OK] blk#2 | 'PHIẾU ĐĂNG KÝ ĐỀTÀI\n(Đồán 2: tổng hợp các kiến thức đã học (phân tích, thiết kếphần mềm, CSDL, ngôn ...'
+  [OK] blk#3 | 'được ít nhất một vấn đềthực tiển nào đó trong xã hội)'
+  [OK] blk#4 | '1. Thông tin cơ bản'
+  [OK] blk#5 | 'Họ&Tên TV1: Hà Hoàng Phúc ....................................MSSV: 222683....................\nEmail...'
+  [OK] blk#6 | '2. Đềtài đăng ký'
+  [OK] blk#7 | 'Tên Đềtài: Website học lập trình - CodequestAI.........................................................'
+  [OK] blk#8 | 'Đềtài có ý định phát triển lên thành Khoá luận tốt nghiệp\n, mong muốn được GV\n(họtên GV……………………….) h...'
+  [OK] blk#9 | 'Tóm tắt nội dung đềtài: Website học lập trình - CodequestAI là nền tảng học lập\ntrình hiện đại, kết ...'
+  [OK] blk#10 | 'Đềtài bao gồm các chức năng nào:'
+  [OK] blk#11 | '(Phân quyền, tìm kiếm, thống kê, báo cáo, quản lý,….):Phân quyền (đăng\nnhập/đăng xuất), quản lý ngườ...'
+  [OK] blk#12 | 'Đềtài có các nội dung: (có/không)'
+  [OK] blk#13 | 'Phân tích thiết kếhệthống: Có .................................................................\nCơ s...'
+
+=== Page 2: 15 blocks | 0 layout-skip | 1 image-skip ===
+  [OK] blk#0 | 'KHOA CÔNG NGHỆTHÔNG TIN'
+  [OK] blk#1 | 'Gửi lại phiếu đăng ký qua Email: ttthao@nctu.edu.vn'
+  [OK] blk#2 | 'Hướng phát triển: Có...................................................................................'
+  [OK] blk#3 | 'Đềtài được ứng dụng vào đâu: Nền tảng học lập trình tương tác với AI dành cho\ngiáo dục, đào tạo, và ...'
+  [SKIP] [no_alpha] blk#4 | '.......................................................................................................'
+  [OK] blk#5 | '3. Ý kiến khác:'
+  [OK] blk#6 | '- Sinh viên có đềxuất gì thêm với GV hướng dẫn:\n.......................................................'
+  [OK] blk#7 | 'Trường\nKiểu dữliệu\nMô tả\nRàng buộc'
+  [OK] blk#8 | 'UserID\nint\nMã\nngười\ndùng'
+  [OK] blk#9 | 'Primary Key'
+  [OK] blk#10 | 'Username\nnvarchar\nTên\nđăng\nnhập'
+  [OK] blk#11 | 'Not\nnull,\nUnique'
+  [OK] blk#12 | 'Password\nnvarchar\nMật khẩu\nNot null'
+  [OK] blk#13 | 'Role\nnvarchar\nVai\ntrò\n(Admin/User)'
+  [OK] blk#14 | 'Not nul'
+
+SUMMARY: 28 will translate, 1 skipped

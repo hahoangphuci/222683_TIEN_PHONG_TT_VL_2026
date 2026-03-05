@@ -156,5 +156,4 @@ def game_leaderboard():
 if __name__ == '__main__':
     # Chỉ in thông tin Trang chủ để không gây lộn xộn khi khởi động
     print("🏠 Trang chủ: http://127.0.0.1:5000")
-
     app.run(host='0.0.0.0', port=5000, debug=True)

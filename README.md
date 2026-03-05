@@ -144,6 +144,22 @@ PDF_ALLOW_NEWLINE_MODE=0
 
 # Strict mode: ưu tiên giữ layout, có thể bỏ qua nhiều dòng khó thay thế
 PDF_STRICT_PRESERVE=0
+
+# (Quan trọng) Font Unicode cho PDF overlay.
+# Một số môi trường (Docker/Linux) không có font hệ thống phù hợp, PyMuPDF có thể báo lỗi
+# kiểu "need font file or buffer" hoặc chữ tiếng Việt bị lỗi.
+# Hãy trỏ tới một file .ttf có hỗ trợ Unicode (ví dụ DejaVuSans.ttf, NotoSans-Regular.ttf).
+PDF_FONT_FILE=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+
+# (Giống bản gốc nhất) Full-page overlay cho PDF (áp dụng cho pipeline v2).
+# - 1: rasterize mỗi trang + OCR bbox + vẽ chữ dịch lên ảnh + chèn ảnh phủ lên trang
+# - 0: dùng redact/overlay theo bbox (text selectable hơn nhưng khó giống 100%)
+PDF_FULL_PAGE_OVERLAY_FORCE=1
+
+# Có xoá (che) chữ gốc dưới nền khi vẽ chữ dịch lên ảnh hay không.
+# - 1: che bằng màu nền ước lượng (thường dễ đọc hơn, giống "thay chữ")
+# - 0: chỉ vẽ đè (có thể thấy chữ gốc lẫn chữ dịch)
+PDF_FULL_PAGE_OVERLAY_ERASE_BEHIND=1
 ```
 
 ## 🔧 Cấu Hình API Keys

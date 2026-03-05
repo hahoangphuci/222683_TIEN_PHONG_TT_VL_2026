@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 import docx
-from docx.enum.text import WD_BREAK
 
 from ..extractor.docx_runs import (
     iter_docx_header_footer_paragraphs,
@@ -98,11 +97,16 @@ class DocxRenderer:
             if not str(dst_para).strip():
                 return
 
-            # Preserve original runs (dot leaders / tabs / formatting). Append a new line + translation.
-            # Using explicit line break avoids altering existing run text.
-            br = p.add_run()
-            br.add_break(WD_BREAK.LINE)
-            p.add_run(str(dst_para))
+            # Find last run that has some text to attach translation.
+            last = None
+            for r in reversed(runs):
+                if (r.text or "").strip():
+                    last = r
+                    break
+            if last is None:
+                last = runs[-1]
+
+            last.text = f"{last.text or ''}\n{dst_para}"
             done += 1
             if progress_cb and done % 30 == 0:
                 progress_cb(min(98, 5 + done // 10), f"DOCX: bilingual-newline {done} paragraphs")
@@ -115,7 +119,7 @@ class DocxRenderer:
 
         doc.save(output_path)
         if progress_cb:
-            progress_cb(100, f"DOCX: completed (bilingual newline by paragraph; appended {done} paragraphs)")
+            progress_cb(100, "DOCX: completed (bilingual newline by paragraph)")
         return output_path
 
     def translate_docx_bilingual_sentence_inline_paragraph(
@@ -243,9 +247,18 @@ class DocxRenderer:
             if not dst_core:
                 return
 
-            # Preserve original runs (dot leaders / tabs / formatting). Append delimiter+translation as new run.
-            spacer = "" if (src_para or "").endswith((" ", "\t")) else " "
-            p.add_run(f"{spacer}{d} {dst_core}")
+            # Append to the last non-empty run to preserve existing run formatting,
+            # tab stops / leaders, and other Word layout behaviors.
+            last = None
+            for r in reversed(runs):
+                if (r.text or "").strip():
+                    last = r
+                    break
+            if last is None:
+                last = runs[-1]
+
+            spacer = "" if (last.text or "").endswith((" ", "\t")) else " "
+            last.text = f"{last.text or ''}{spacer}{d} {dst_core}"
 
             done += 1
             if progress_cb and done % 25 == 0:

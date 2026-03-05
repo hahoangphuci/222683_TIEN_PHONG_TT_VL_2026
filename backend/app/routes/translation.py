@@ -55,13 +55,7 @@ def translate_text():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except RuntimeError as e:
-        err = str(e)
-        err_low = err.lower()
-        if '402' in err_low or 'insufficient' in err_low or 'credit' in err_low:
-            return jsonify({"error": err, "code": "insufficient_credits"}), 402
-        if '429' in err_low or 'too many requests' in err_low or 'rate' in err_low:
-            return jsonify({"error": err, "code": "rate_limited"}), 429
-        return jsonify({"error": err}), 503
+        return jsonify({"error": str(e)}), 503
 
     translation = Translation(
         user_id=user.id if user else None,
@@ -83,31 +77,6 @@ def translate_document():
     
     file = request.files['file']
     target_lang = request.form.get('target_lang')
-    # Optional: OCR processing (PDF/DOCX). For PDFs, default to OCR+overlay to preserve layout.
-    ocr_images_raw = (request.form.get('ocr_images') or '').strip().lower()
-    ocr_images = ocr_images_raw in ('1', 'true', 'yes', 'on')
-    ocr_langs = (request.form.get('ocr_langs') or '').strip() or None
-    ocr_mode = (request.form.get('ocr_mode') or '').strip().lower() or None
-    if ocr_mode and ocr_mode not in ('image', 'text', 'both', 'auto'):
-        return jsonify({"error": "Invalid ocr_mode. Use one of: auto, image, text, both."}), 400
-    bilingual_mode = (request.form.get('bilingual_mode') or '').strip().lower() or None
-    if bilingual_mode and bilingual_mode not in ('none', 'inline', 'newline', 'sentence', 'sentence_newline', 'paren'):
-        return jsonify({"error": "Invalid bilingual_mode. Use one of: none, inline, newline, sentence, sentence_newline, paren."}), 400
-
-    bilingual_delimiter = (request.form.get('bilingual_delimiter') or '').strip() or None
-    if bilingual_delimiter and len(bilingual_delimiter) > 10:
-        return jsonify({"error": "Invalid bilingual_delimiter. Max length is 10 characters."}), 400
-
-    # Document pipeline selection:
-    # - v2     : strict extractor/translator/renderer pipeline (block-by-block, coords preserved)
-    # - legacy : existing FileService pipeline
-    pipeline = (request.form.get('pipeline') or os.getenv('DOCUMENT_PIPELINE_DEFAULT') or 'v2').strip().lower()
-    if pipeline not in ('v2', 'legacy'):
-        return jsonify({"error": "Invalid pipeline. Use: v2 or legacy."}), 400
-
-    # PDF handling for this endpoint:
-    # Requirement: PDF input must return PDF output (no automatic PDF->DOCX).
-    pdf_docx_pipeline = None
 
     if not target_lang or not str(target_lang).strip():
         return jsonify({"error": "target_lang is required"}), 400
@@ -117,9 +86,6 @@ def translate_document():
     
     filename = secure_filename(file.filename)
     ext = os.path.splitext(filename)[1].lower()
-
-    if ext == '.pdf':
-        pdf_docx_pipeline = False
     filepath = os.path.join(UPLOAD_FOLDER, filename)
     file.save(filepath)
     
@@ -139,18 +105,7 @@ def translate_document():
     db.session.commit()
 
     # Start background job
-    job_id = translation_service.translate_document_background(
-        filepath,
-        target_lang,
-        user_id=user_id,
-        ocr_images=ocr_images,
-        ocr_langs=ocr_langs,
-        ocr_mode=ocr_mode,
-        bilingual_mode=bilingual_mode,
-        bilingual_delimiter=bilingual_delimiter,
-        pdf_docx_pipeline=pdf_docx_pipeline,
-        pipeline=pipeline,
-    )
+    job_id = translation_service.translate_document_background(filepath, target_lang, user_id=user_id)
 
     return jsonify({"job_id": job_id, "status_url": f"/api/translation/document/status/{job_id}"}), 202
 
@@ -208,7 +163,7 @@ def translate_image():
         rendered_image_data_url = None
 
         if render_overlay:
-            ocr_text, translated_text, png_bytes, _rec_mode = translation_service.ocr_translate_overlay(
+            ocr_text, translated_text, png_bytes = translation_service.ocr_translate_overlay(
                 filepath,
                 source_lang=source_lang,
                 target_lang=target_lang,
@@ -226,13 +181,7 @@ def translate_image():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except RuntimeError as e:
-        err = str(e)
-        err_low = err.lower()
-        if '402' in err_low or 'insufficient' in err_low or 'credit' in err_low:
-            return jsonify({"error": err, "code": "insufficient_credits"}), 402
-        if '429' in err_low or 'too many requests' in err_low or 'rate' in err_low:
-            return jsonify({"error": err, "code": "rate_limited"}), 429
-        return jsonify({"error": err}), 503
+        return jsonify({"error": str(e)}), 503
     finally:
         # Best-effort cleanup
         try:
@@ -260,83 +209,25 @@ def translate_image():
         payload["rendered_image"] = rendered_image_data_url
     return jsonify(payload), 200
 
-
-@translation_bp.route('/ocr', methods=['POST'])
-@jwt_required(optional=True)
-def ocr_image_only():
-    """Extract text from an uploaded image (OCR only, no translation)."""
-    if 'file' not in request.files:
-        return jsonify({"error": "No file provided"}), 400
-
-    file = request.files['file']
-    if not file or not file.filename:
-        return jsonify({"error": "No file selected"}), 400
-
-    ocr_langs = (request.form.get('ocr_langs') or '').strip() or None
-
-    # Basic extension allowlist
-    filename = secure_filename(file.filename)
-    ext = os.path.splitext(filename)[1].lower()
-    allowed = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp'}
-    if ext not in allowed:
-        return jsonify({"error": "Unsupported image type. Use png/jpg/jpeg/bmp/tiff/webp."}), 400
-
-    # Save to uploads with unique prefix
-    unique_name = f"{uuid.uuid4().hex}_{filename}"
-    filepath = os.path.join(UPLOAD_FOLDER, unique_name)
-    file.save(filepath)
-
-    try:
-        ocr_text = translation_service.ocr_image_to_text(filepath, ocr_langs=ocr_langs)
-        if not ocr_text or not str(ocr_text).strip():
-            return jsonify({"error": "OCR found no text in the image."}), 400
-    except RuntimeError as e:
-        return jsonify({"error": str(e)}), 503
-    except Exception as e:
-        return jsonify({"error": f"OCR failed: {e}"}), 500
-    finally:
-        # Best-effort cleanup
-        try:
-            os.remove(filepath)
-        except Exception:
-            pass
-
-    return jsonify({"ocr_text": ocr_text}), 200
-
 @translation_bp.route('/document/status/<job_id>', methods=['GET'])
 @jwt_required(optional=True)
 def document_status(job_id):
     job = translation_service.get_job(job_id)
     if not job:
         return jsonify({"error": "Job not found"}), 404
-    # If a job claims completion but the output file is missing, surface it as failed.
-    if job.get('status') == 'completed' and job.get('download_path'):
-        try:
-            if not os.path.exists(str(job.get('download_path'))):
-                job['status'] = 'failed'
-                job['error'] = f"Output file missing: {job.get('download_path')}"
-                job['message'] = 'Failed - Output file missing'
-        except Exception:
-            pass
     # When completed, include download_url
     download_url = None
     if job.get('status') == 'completed' and job.get('download_path'):
         download_url = f"/downloads/{os.path.basename(job.get('download_path'))}"
-    ocr_text_url = None
-    if job.get('status') == 'completed' and job.get('ocr_text_path'):
-        ocr_text_url = f"/downloads/{os.path.basename(job.get('ocr_text_path'))}"
     return jsonify({
         'job_id': job_id,
         'status': job.get('status'),
         'progress': job.get('progress'),
         'message': job.get('message'),
         'download_url': download_url,
-        'ocr_text_url': ocr_text_url,
         'error': job.get('error'),
         'fallback': job.get('fallback', False),
-        'fallback_reason': job.get('fallback_reason'),
-        'ocr_summary': job.get('ocr_summary'),
-        'ocr_skipped': job.get('ocr_skipped')
+        'fallback_reason': job.get('fallback_reason')
     }), 200
 
 

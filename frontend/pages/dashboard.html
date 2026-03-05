@@ -529,15 +529,26 @@
                       justify-content: space-between;
                     "
                   >
-                    <label
-                      class="toggle small"
-                      title="Cách 2 (Giữ ảnh) sẽ trả về ảnh đã thay chữ. Cách 1 (OCR) chỉ trả văn bản để bạn copy/chỉnh sửa."
+                    <div
+                      class="image-output-mode"
+                      title="Tự động: AI nhận diện bố cục để chọn trả về văn bản/ảnh/cả 2"
                     >
-                      <input type="checkbox" id="imageRenderOverlay" checked />
-                      <span id="imageModeLabel"
-                        >Dùng cách 2 (Giữ ảnh): Trả ảnh đã thay chữ (beta)</span
+                      <span id="imageModeLabel">Chế độ:</span>
+                      <select
+                        id="imageOutputMode"
+                        class="lang-select"
+                        data-static-options="true"
                       >
-                    </label>
+                        <option value="auto" selected>Tự động (AI chọn)</option>
+                        <option value="text">Cách 1 (OCR): Trả văn bản</option>
+                        <option value="image">
+                          Cách 2 (Giữ ảnh): Trả ảnh đã thay chữ (beta)
+                        </option>
+                        <option value="both">
+                          Cách 3: Trả cả ảnh + văn bản
+                        </option>
+                      </select>
+                    </div>
 
                     <button
                       id="imageDownloadBtn"
@@ -562,6 +573,7 @@
                   </div>
 
                   <div
+                    id="imageTextResult"
                     style="
                       margin-top: 10px;
                       display: grid;
@@ -658,89 +670,103 @@
                   <span id="fileName"></span>
                   <span id="fileSize"></span>
                 </div>
-                <div class="upload-controls">
-                  <select
-                    id="uploadSourceLang"
-                    class="lang-select"
-                    data-autodetect="true"
-                    data-autodetect-label="Tự động (Auto-detect)"
-                    data-placeholder="Ngôn ngữ nguồn"
-                  ></select>
-                  <select
-                    id="uploadTargetLang"
-                    class="lang-select"
-                    data-placeholder="Ngôn ngữ đích"
-                  ></select>
-                  <label
-                    class="toggle small"
-                    title="Áp dụng cho Word (.docx) và PDF. Dùng AI Vision hoặc Tesseract OCR để đọc chữ trong ảnh."
+                <div class="upload-controls upload-controls--document">
+                  <div class="upload-controls__row upload-controls__row--langs">
+                    <select
+                      id="uploadSourceLang"
+                      class="lang-select"
+                      data-autodetect="true"
+                      data-autodetect-label="Tự động (Auto-detect)"
+                      data-placeholder="Ngôn ngữ nguồn"
+                    ></select>
+                    <select
+                      id="uploadTargetLang"
+                      class="lang-select"
+                      data-placeholder="Ngôn ngữ đích"
+                    ></select>
+                  </div>
+
+                  <div
+                    class="upload-controls__row upload-controls__row--options"
                   >
-                    <input type="checkbox" id="uploadDocxOcrImages" checked />
-                    <span>Dịch chữ trong ảnh (Word, PDF)</span>
-                  </label>
-                  <select
-                    id="uploadDocxOcrMode"
-                    class="lang-select"
-                    title="Chọn cách xử lý chữ trong ảnh khi dịch Word (.docx) hoặc PDF"
-                    data-static-options="true"
-                  >
-                    <option value="auto">
-                      Tự động (AI chọn theo từng ảnh)
-                    </option>
-                    <option value="image" selected>
-                      Chữ lên ảnh: thay chữ trực tiếp lên ảnh
-                    </option>
-                    <option value="text">
-                      Chữ văn bản: thay ảnh bằng văn bản dịch
-                    </option>
-                    <option value="both">
-                      Cả 2: vừa thay chữ lên ảnh vừa thêm văn bản
-                    </option>
-                  </select>
-                  <select
-                    id="uploadBilingualMode"
-                    class="lang-select"
-                    title="Chế độ song ngữ: giữ nguyên bản gốc bên cạnh bản dịch"
-                    data-static-options="true"
-                  >
-                    <option value="none" selected>
-                      Dịch thường (chỉ bản dịch)
-                    </option>
-                    <option value="inline">
-                      Song ngữ liền kề (Gốc | Dịch)
-                    </option>
-                    <option value="newline">Song ngữ xuống dòng</option>
-                  </select>
-                  <select
-                    id="uploadBilingualDelimiter"
-                    class="lang-select"
-                    title="Dấu ngăn cách khi chọn Song ngữ liền kề (Gốc <dấu> Dịch)"
-                    data-static-options="true"
-                  >
-                    <option value="|" selected>|</option>
-                    <option value=":">:</option>
-                    <option value="/">/</option>
-                    <option value="&#92;">&#92;</option>
-                    <option value="-">-</option>
-                  </select>
-                  <button
-                    id="uploadBtn"
-                    class="btn-primary"
-                    onclick="uploadDocument()"
-                  >
-                    <i class="fas fa-upload"></i>
-                    <span id="uploadBtnText">Upload & Dịch</span>
-                    <div
-                      id="uploadBtnLoading"
-                      class="btn-loading"
-                      style="display: none"
+                    <label
+                      class="toggle small"
+                      title="Áp dụng cho Word (.docx) và PDF. Dùng AI Vision hoặc Tesseract OCR để đọc chữ trong ảnh."
                     >
-                      <div class="spinner"></div>
+                      <input type="checkbox" id="uploadDocxOcrImages" checked />
+                      <span>Dịch chữ trong ảnh (Word, PDF)</span>
+                    </label>
+                    <select
+                      id="uploadDocxOcrMode"
+                      class="lang-select"
+                      title="Chọn cách xử lý chữ trong ảnh khi dịch Word (.docx) hoặc PDF"
+                      data-static-options="true"
+                    >
+                      <option value="auto">
+                        Tự động (AI chọn theo từng ảnh)
+                      </option>
+                      <option value="image" selected>
+                        Chữ lên ảnh: thay chữ trực tiếp lên ảnh
+                      </option>
+                      <option value="text">
+                        Chữ văn bản: thay ảnh bằng văn bản dịch
+                      </option>
+                      <option value="both">
+                        Cả 2: vừa thay chữ lên ảnh vừa thêm văn bản
+                      </option>
+                    </select>
+                    <select
+                      id="uploadBilingualMode"
+                      class="lang-select"
+                      title="Chế độ song ngữ: giữ nguyên bản gốc bên cạnh bản dịch"
+                      data-static-options="true"
+                    >
+                      <option value="none" selected>
+                        Dịch thường (chỉ bản dịch)
+                      </option>
+                      <option value="inline">
+                        Song ngữ liền kề (Gốc | Dịch)
+                      </option>
+                      <option value="newline">Song ngữ xuống dòng</option>
+                    </select>
+                    <div class="upload-bilingual-delimiter" aria-hidden="true">
+                      <select
+                        id="uploadBilingualDelimiter"
+                        class="lang-select"
+                        title="Dấu ngăn cách khi chọn Song ngữ liền kề (Gốc <dấu> Dịch)"
+                        data-static-options="true"
+                      >
+                        <option value="|" selected>|</option>
+                        <option value=":">:</option>
+                        <option value="/">/</option>
+                        <option value="&#92;">&#92;</option>
+                        <option value="-">-</option>
+                      </select>
                     </div>
-                  </button>
-                  <button class="btn-secondary" onclick="clearFile()">
-                    <i class="fas fa-times"></i> Xóa
-                  </button>
+                  </div>
+
+                  <div
+                    class="upload-controls__row upload-controls__row--actions"
+                  >
+                    <button
+                      id="uploadBtn"
+                      class="btn-primary"
+                      onclick="uploadDocument()"
+                    >
+                      <i class="fas fa-upload"></i>
+                      <span id="uploadBtnText">Upload & Dịch</span>
+                      <div
+                        id="uploadBtnLoading"
+                        class="btn-loading"
+                        style="display: none"
+                      >
+                        <div class="spinner"></div>
+                      </div>
+                    </button>
+                    <button class="btn-secondary" onclick="clearFile()">
+                      <i class="fas fa-times"></i> Xóa
+                    </button>
+                  </div>
                 </div>
               </div>
               <div id="uploadError" class="error-message" style="display: none">

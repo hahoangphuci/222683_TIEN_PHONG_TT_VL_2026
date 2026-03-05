@@ -8,8 +8,6 @@ import re
 import shutil
 from dotenv import load_dotenv
 from app.services.file_service import FileService, ProviderRateLimitError
-from app.services.document_v2.pipeline import DocumentPipelineV2
-from app.services.document_v2.types import ProviderRateLimitError as ProviderRateLimitErrorV2
 from deep_translator import MyMemoryTranslator, GoogleTranslator
 import requests
 import urllib.parse
@@ -746,7 +744,7 @@ class TranslationService:
         except Exception as e:
             raise RuntimeError(f"OCR failed: {e}") from e
 
-    def ocr_translate_overlay(self, image_path, source_lang, target_lang, ocr_langs=None):
+    def ocr_translate_overlay(self, image_path, source_lang, target_lang, ocr_langs=None, return_blocks: bool = False):
         """OCR an image, translate detected text, and render translated text back onto the image.
 
         Returns: (ocr_text, translated_text, png_bytes, recommended_mode)
@@ -768,7 +766,11 @@ class TranslationService:
         # For RTL targets, force AI-vision banner overlay to avoid broken glyph shaping
         # and unstable per-box placement from Tesseract line rendering.
         if target_base in ('ar', 'fa', 'ur', 'he', 'iw'):
-            return self._ai_vision_overlay_fallback(image_path, source_lang, target_lang)
+            res = self._ai_vision_overlay_fallback(image_path, source_lang, target_lang)
+            if return_blocks:
+                ocr_text, translated_text, png_bytes, recommended_mode = res
+                return (ocr_text, translated_text, png_bytes, recommended_mode, [], 'B')
+            return res
 
         # Prefer API-based bbox OCR for overlay (more portable than Tesseract).
         prefer_api_bbox = str(os.getenv('OCR_OVERLAY_USE_API', '1')).strip().lower() in ('1', 'true', 'yes', 'on')
@@ -840,20 +842,32 @@ class TranslationService:
             # ── Check if Tesseract is available ──
             if not self._is_tesseract_available():
                 # Use AI Vision banner fallback
-                return self._ai_vision_overlay_fallback(image_path, source_lang, target_lang)
+                res = self._ai_vision_overlay_fallback(image_path, source_lang, target_lang)
+                if return_blocks:
+                    ocr_text, translated_text, png_bytes, recommended_mode = res
+                    return (ocr_text, translated_text, png_bytes, recommended_mode, [], 'B')
+                return res
 
             try:
                 import pytesseract
                 from pytesseract import Output
             except Exception:
-                return self._ai_vision_overlay_fallback(image_path, source_lang, target_lang)
+                res = self._ai_vision_overlay_fallback(image_path, source_lang, target_lang)
+                if return_blocks:
+                    ocr_text, translated_text, png_bytes, recommended_mode = res
+                    return (ocr_text, translated_text, png_bytes, recommended_mode, [], 'B')
+                return res
 
             # Reuse existing resolver logic by calling _tesseract_ocr once to validate tesseract availability.
             # This also sets pytesseract.pytesseract.tesseract_cmd if needed.
             try:
                 _ = self._tesseract_ocr(image_path, ocr_langs=ocr_langs)
             except Exception:
-                return self._ai_vision_overlay_fallback(image_path, source_lang, target_lang)
+                res = self._ai_vision_overlay_fallback(image_path, source_lang, target_lang)
+                if return_blocks:
+                    ocr_text, translated_text, png_bytes, recommended_mode = res
+                    return (ocr_text, translated_text, png_bytes, recommended_mode, [], 'B')
+                return res
 
             langs = (ocr_langs or os.getenv('OCR_LANGS_DEFAULT') or 'eng').strip() or 'eng'
 
@@ -1056,6 +1070,7 @@ class TranslationService:
         draw = ImageDraw.Draw(base_img)
         ocr_lines = []
         translated_lines = []
+        blocks = []
 
         leader_re = re.compile(r"(\.{5,}|_{4,}|-{4,})")
 
@@ -1240,6 +1255,24 @@ class TranslationService:
             t = max(0, item['top'])
             r = min(base_img.size[0], item['right'])
             b = min(base_img.size[1], item['bottom'])
+
+            if return_blocks:
+                try:
+                    x0 = float(l) / float(w_img)
+                    y0 = float(t) / float(h_img)
+                    x1 = float(r) / float(w_img)
+                    y1 = float(b) / float(h_img)
+                except Exception:
+                    x0 = y0 = 0.0
+                    x1 = y1 = 0.0
+                blocks.append({
+                    'original_text': src_text,
+                    'translated_text': dst_text,
+                    'position': {
+                        'bbox_norm': [x0, y0, x1, y1],
+                        'bbox_px': [int(l), int(t), int(r), int(b)],
+                    }
+                })
             box_w = max(1, r - l)
             box_h = max(1, b - t)
 
@@ -1306,6 +1339,38 @@ class TranslationService:
         else:
             # Ambiguous/mixed image blocks (photo + text) -> keep visual design
             recommended_mode = 'image'
+
+        # Classify image type for downstream JSON/UI.
+        # A: mostly text blocks, return text
+        # B: poster/banner-ish, preserve layout
+        # C: table/form-ish, preserve layout
+        image_type = 'B'
+        try:
+            if recommended_mode == 'text':
+                image_type = 'A'
+            else:
+                form_score = 0
+                for ln in non_empty_lines:
+                    s = (ln or '').strip()
+                    if not s:
+                        continue
+                    if leader_re.search(s):
+                        form_score += 2
+                    if re.search(r"_{3,}", s):
+                        form_score += 2
+                    if re.search(r"\b(name|date|address|phone|email|dob|id)\b", s, flags=re.IGNORECASE):
+                        form_score += 1
+                    if re.search(r"\b(h\u1ecd t\u00ean|ng\u00e0y|\u0111\u1ecba ch\u1ec9|s\u1ed1 \u0111i\u1ec7n tho\u1ea1i|email|cmnd|cccd)\b", s, flags=re.IGNORECASE):
+                        form_score += 1
+                if form_score >= 5 and len(non_empty_lines) >= 4:
+                    image_type = 'C'
+                else:
+                    image_type = 'B'
+        except Exception:
+            image_type = 'B'
+
+        if return_blocks:
+            return (ocr_full_text, "\n".join(translated_lines).strip(), png_bytes, recommended_mode, blocks, image_type)
         return (ocr_full_text, "\n".join(translated_lines).strip(), png_bytes, recommended_mode)
 
     def _ai_vision_overlay_fallback(self, image_path, source_lang, target_lang):
@@ -1479,7 +1544,7 @@ class TranslationService:
             # but actual chat completions may still work fine.
             print(f"AI provider preflight warning (proceeding anyway): {e}")
             return (True, None)
-    def translate_document_background(self, file_path, target_lang, user_id=None, *, ocr_images=False, ocr_langs=None, ocr_mode=None, bilingual_mode=None, bilingual_delimiter=None, pdf_docx_pipeline=None, pipeline=None):
+    def translate_document_background(self, file_path, target_lang, user_id=None, *, ocr_images=False, ocr_langs=None, ocr_mode=None, bilingual_mode=None, bilingual_delimiter=None):
         job_id = str(uuid.uuid4())
         disable_fallback = (os.getenv('AI_DISABLE_FALLBACK') or '').strip().lower() in ('1', 'true', 'yes', 'on')
         self.jobs[job_id] = {
@@ -1511,7 +1576,7 @@ class TranslationService:
             self.jobs[job_id]['message'] = 'Starting with fallback translators (AI limited)'
             self.jobs[job_id]['error'] = str(message)
 
-        def _worker(job_id, file_path, target_lang, ocr_images, ocr_langs, ocr_mode, bilingual_mode, bilingual_delimiter, pdf_docx_pipeline, pipeline):
+        def _worker(job_id, file_path, target_lang, ocr_images, ocr_langs, ocr_mode, bilingual_mode, bilingual_delimiter):
             try:
                 self.jobs[job_id]['status'] = 'in_progress'
                 self.jobs[job_id]['progress'] = 5
@@ -1534,34 +1599,17 @@ class TranslationService:
                     if s.startswith('Skipping DOCX image OCR'):
                         ocr_skip_message = s
 
-                # Pipeline selection
-                chosen = (pipeline or os.getenv('DOCUMENT_PIPELINE', 'v2')).strip().lower()
-                if chosen not in ('v2', 'legacy'):
-                    chosen = 'v2'
-
-                if chosen == 'v2':
-                    v2 = DocumentPipelineV2()
-                    output_path = v2.process(
-                        file_path,
-                        target_lang,
-                        progress_cb=progress_cb,
-                        ocr_langs=ocr_langs,
-                        bilingual_mode=bilingual_mode,
-                        bilingual_delimiter=bilingual_delimiter,
-                    )
-                else:
-                    # Legacy pipeline (kept for compatibility)
-                    output_path = self.file_service.process_document(
-                        file_path,
-                        target_lang,
-                        progress_callback=progress_cb,
-                        ocr_images=bool(ocr_images),
-                        ocr_langs=ocr_langs,
-                        ocr_mode=ocr_mode,
-                        bilingual_mode=bilingual_mode,
-                        bilingual_delimiter=bilingual_delimiter,
-                        pdf_docx_pipeline=pdf_docx_pipeline,
-                    )
+                # Document translation is handled by FileService (DOCX/XLSX/TXT/PDF).
+                output_path = self.file_service.process_document(
+                    file_path,
+                    target_lang,
+                    progress_callback=progress_cb,
+                    ocr_images=bool(ocr_images),
+                    ocr_langs=ocr_langs,
+                    ocr_mode=ocr_mode,
+                    bilingual_mode=bilingual_mode,
+                    bilingual_delimiter=bilingual_delimiter,
+                )
 
                 # Validate and normalize output to backend/downloads so the /downloads route can serve it.
                 if not output_path or not str(output_path).strip():
@@ -1608,21 +1656,15 @@ class TranslationService:
                     orig_ext = os.path.splitext(file_path)[1].lower()
                     out_ext = os.path.splitext(output_path)[1].lower()
                     if out_ext and orig_ext and out_ext != orig_ext:
-                        # Expected output change when explicitly using PDF->DOCX pipeline.
-                        if bool(pdf_docx_pipeline) and orig_ext == '.pdf' and out_ext == '.docx':
-                            self.jobs[job_id]['fallback'] = False
-                            self.jobs[job_id]['output_format'] = 'docx'
-                            self.jobs[job_id]['message'] = 'Completed (DOCX for best format preservation)'
+                        self.jobs[job_id]['fallback'] = True
+                        self.jobs[job_id]['fallback_reason'] = f"Output changed from {orig_ext} to {out_ext}"
+                        # Keep OCR summary visible if available
+                        if ocr_images and self.jobs[job_id].get('ocr_summary'):
+                            self.jobs[job_id]['message'] = f"Completed with fallback — {self.jobs[job_id]['ocr_summary']}"
+                        elif ocr_images and self.jobs[job_id].get('ocr_skipped'):
+                            self.jobs[job_id]['message'] = f"Completed with fallback — {self.jobs[job_id]['ocr_skipped']}"
                         else:
-                            self.jobs[job_id]['fallback'] = True
-                            self.jobs[job_id]['fallback_reason'] = f"Output changed from {orig_ext} to {out_ext}"
-                            # Keep OCR summary visible if available
-                            if ocr_images and self.jobs[job_id].get('ocr_summary'):
-                                self.jobs[job_id]['message'] = f"Completed with fallback — {self.jobs[job_id]['ocr_summary']}"
-                            elif ocr_images and self.jobs[job_id].get('ocr_skipped'):
-                                self.jobs[job_id]['message'] = f"Completed with fallback — {self.jobs[job_id]['ocr_skipped']}"
-                            else:
-                                self.jobs[job_id]['message'] = 'Completed with fallback'
+                            self.jobs[job_id]['message'] = 'Completed with fallback'
                     else:
                         self.jobs[job_id]['fallback'] = False
                         if ocr_images and self.jobs[job_id].get('ocr_summary'):
@@ -1642,7 +1684,7 @@ class TranslationService:
 
                 self.jobs[job_id]['progress'] = 100
                 self.jobs[job_id]['status'] = 'completed'
-            except (ProviderRateLimitError, ProviderRateLimitErrorV2) as e:
+            except (ProviderRateLimitError,) as e:
                 self.jobs[job_id]['status'] = 'failed'
                 self.jobs[job_id]['error'] = str(e)
                 err_low = str(e).lower()
@@ -1660,7 +1702,7 @@ class TranslationService:
                 self.jobs[job_id]['error'] = str(e)
                 self.jobs[job_id]['message'] = 'Failed'
 
-        thread = threading.Thread(target=_worker, args=(job_id, file_path, target_lang, ocr_images, ocr_langs, ocr_mode, bilingual_mode, bilingual_delimiter, pdf_docx_pipeline, pipeline), daemon=True)
+        thread = threading.Thread(target=_worker, args=(job_id, file_path, target_lang, ocr_images, ocr_langs, ocr_mode, bilingual_mode, bilingual_delimiter), daemon=True)
         thread.start()
         return job_id
 
