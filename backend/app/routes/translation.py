@@ -104,8 +104,20 @@ def translate_document():
     db.session.add(translation)
     db.session.commit()
 
+    # Extract optional bilingual / OCR parameters sent by the frontend
+    bilingual_mode = (request.form.get('bilingual_mode') or '').strip() or None
+    bilingual_delimiter = (request.form.get('bilingual_delimiter') or '').strip() or None
+    ocr_images = (request.form.get('ocr_images') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+    ocr_mode = (request.form.get('ocr_mode') or '').strip() or None
+    ocr_langs = (request.form.get('ocr_langs') or '').strip() or None
+    print(f"[translate_document] bilingual_mode={bilingual_mode!r}, bilingual_delimiter={bilingual_delimiter!r}, ext={ext}")
+
     # Start background job
-    job_id = translation_service.translate_document_background(filepath, target_lang, user_id=user_id)
+    job_id = translation_service.translate_document_background(
+        filepath, target_lang, user_id=user_id,
+        ocr_images=ocr_images, ocr_langs=ocr_langs, ocr_mode=ocr_mode,
+        bilingual_mode=bilingual_mode, bilingual_delimiter=bilingual_delimiter,
+    )
 
     return jsonify({"job_id": job_id, "status_url": f"/api/translation/document/status/{job_id}"}), 202
 

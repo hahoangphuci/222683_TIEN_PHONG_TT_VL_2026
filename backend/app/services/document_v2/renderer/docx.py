@@ -178,10 +178,20 @@ class DocxRenderer:
             if not out_text.strip():
                 return
 
-            # Preserve formatting by writing into first run; clear others.
-            runs[0].text = out_text
-            for r in runs[1:]:
-                r.text = ""
+            # Preserve formatting: write into first content run if uniform,
+            # otherwise detect different formatting and write to first run only
+            # (bilingual inline mode concatenates everything, format-group
+            # strategy doesn't apply here; just use first-content-run).
+            from docx.oxml.ns import qn as _qn
+            content_indices = [i for i, r in enumerate(runs) if (r.text or "").strip()]
+            if not content_indices:
+                content_indices = [0]
+
+            target = content_indices[0]
+            runs[target].text = out_text
+            for i, r in enumerate(runs):
+                if i != target:
+                    r.text = ""
 
             done += 1
             if progress_cb and done % 25 == 0:

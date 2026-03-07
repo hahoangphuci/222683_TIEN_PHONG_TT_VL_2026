@@ -88,7 +88,7 @@ class FileService:
         name, ext = os.path.splitext(filename)
 
         if ext.lower() == '.pdf':
-            return self._process_pdf(file_path, target_lang, progress_callback)
+            return self._process_pdf(file_path, target_lang, progress_callback, bilingual_mode=bilingual_mode, bilingual_delimiter=bilingual_delimiter)
         elif ext.lower() == '.docx':
             return self._process_docx(file_path, target_lang, progress_callback, ocr_images=ocr_images, ocr_langs=ocr_langs, ocr_mode=ocr_mode, bilingual_mode=bilingual_mode, bilingual_delimiter=bilingual_delimiter)
         elif ext.lower() == '.xlsx':
@@ -98,18 +98,18 @@ class FileService:
         else:
             raise ValueError("Unsupported file type")
 
-    def _process_pdf(self, file_path, target_lang, progress_callback=None):
+    def _process_pdf(self, file_path, target_lang, progress_callback=None, *, bilingual_mode=None, bilingual_delimiter=None):
         """Translate a text-based PDF while preserving original layout.
 
         Strategy:
-          - Extract text lines with bounding boxes.
-          - Remove (redact) the original text for those boxes.
-          - Insert translated text back into the same boxes via insert_textbox.
+          - Extract text spans with bounding boxes, font info, and color.
+          - Use redaction API to remove original text (preserving table borders/lines).
+          - Insert translated text back into the same boxes using Unicode-capable fonts.
 
-        Notes / limitations:
-          - Works best for selectable-text PDFs.
-          - If text length expands, font size is reduced to fit the original box.
-          - Complex typography (mixed fonts within a line, curved/rotated text) may not be perfect.
+        Bilingual modes:
+          - None / 'none': normal (replace original with translation)
+          - 'inline':  song ngữ liền kề — "Original | Translated" in same box
+          - 'newline': song ngữ xuống dòng — original on top, translated below
         """
 
         try:
@@ -119,6 +119,12 @@ class FileService:
 
         if not os.path.exists(file_path):
             raise FileNotFoundError(file_path)
+
+        # ── Bilingual mode ──
+        bi_mode = (str(bilingual_mode).strip().lower() if bilingual_mode else 'none')
+        if bi_mode not in ('none', 'inline', 'newline'):
+            bi_mode = 'none'
+        bi_delim = self._normalize_bilingual_delimiter(bilingual_delimiter) if bi_mode == 'inline' else '|'
 
         # Output path in downloads (consistent with other document outputs)
         base = os.path.splitext(os.path.basename(file_path))[0]
@@ -133,7 +139,6 @@ class FileService:
                 return False
             if not str(s).strip():
                 return False
-            # Skip pure punctuation / symbols / numbers.
             core = str(s).strip()
             if re.fullmatch(r"[\d\W_]+", core, flags=re.UNICODE):
                 return False
@@ -162,12 +167,56 @@ class FileService:
             b = (c & 255) / 255.0
             return (r, g, b)
 
-        def _choose_builtin_font(style_span: dict) -> str:
-            """Pick a built-in PDF font name that approximates the original span.
+        # ── Unicode font resolution (supports Vietnamese/CJK diacritics) ──
+        # Map font families to system font files with bold/italic variants.
+        _FONT_DIR = os.environ.get("FONT_DIR", "")
+        if not _FONT_DIR or not os.path.isdir(_FONT_DIR):
+            # Windows
+            if os.path.isdir(r"C:\Windows\Fonts"):
+                _FONT_DIR = r"C:\Windows\Fonts"
+            # Linux / Docker
+            elif os.path.isdir("/usr/share/fonts/truetype"):
+                _FONT_DIR = "/usr/share/fonts/truetype"
+            else:
+                _FONT_DIR = ""
 
-            Why: Using the extracted font name often fails for insert_textbox() unless the font
-            is one of the built-in Base-14 or explicitly registered. Built-ins reliably support
-            bold/italic variants.
+        # (regular, bold, italic, bold-italic) file names
+        _FONT_FAMILIES = {
+            "sans": ("arial.ttf", "arialbd.ttf", "ariali.ttf", "arialbi.ttf"),
+            "serif": ("times.ttf", "timesbd.ttf", "timesi.ttf", "timesbi.ttf"),
+            "mono": ("cour.ttf", "courbd.ttf", "couri.ttf", "courbi.ttf"),
+        }
+        # Linux fallback names
+        _FONT_FAMILIES_LINUX = {
+            "sans": ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf", "DejaVuSans-Oblique.ttf", "DejaVuSans-BoldOblique.ttf"),
+            "serif": ("DejaVuSerif.ttf", "DejaVuSerif-Bold.ttf", "DejaVuSerif-Italic.ttf", "DejaVuSerif-BoldItalic.ttf"),
+            "mono": ("DejaVuSansMono.ttf", "DejaVuSansMono-Bold.ttf", "DejaVuSansMono-Oblique.ttf", "DejaVuSansMono-BoldOblique.ttf"),
+        }
+
+        def _find_font_file(family_key, variant_idx):
+            """Find a system font file. variant_idx: 0=regular, 1=bold, 2=italic, 3=bolditalic."""
+            for families in (_FONT_FAMILIES, _FONT_FAMILIES_LINUX):
+                names = families.get(family_key, families["sans"])
+                fname = names[variant_idx]
+                # Direct path
+                path = os.path.join(_FONT_DIR, fname)
+                if os.path.isfile(path):
+                    return path
+                # Search subdirectories (Linux: /usr/share/fonts/truetype/dejavu/)
+                if _FONT_DIR:
+                    for root, _dirs, files in os.walk(_FONT_DIR):
+                        if fname in files:
+                            return os.path.join(root, fname)
+            return None
+
+        # Cache resolved font paths
+        _font_cache = {}
+
+        def _resolve_font(style_span: dict):
+            """Resolve a Unicode-capable font file + internal name for a span's style.
+
+            Returns (fontname_str, fontfile_path_or_None, family_key).
+            If fontfile is None, falls back to Base-14 names.
             """
             name = str((style_span or {}).get("font") or "").lower()
             flags = 0
@@ -179,77 +228,85 @@ class FileService:
             is_bold = ("bold" in name) or bool(flags & 16)
             is_italic = ("italic" in name) or ("oblique" in name) or bool(flags & 2)
 
-            # Choose family
-            family = "Helvetica"
-            if "times" in name or "tiro" in name or "serif" in name:
-                family = "Times"
+            # Classify family
+            family = "sans"
+            if "times" in name or "tiro" in name or "serif" in name or "georgia" in name:
+                family = "serif"
             elif "cour" in name or "mono" in name or "consol" in name:
-                family = "Courier"
-            elif "helv" in name or "arial" in name or "sans" in name:
-                family = "Helvetica"
+                family = "mono"
 
-            # Use Base-14 font names which PyMuPDF accepts without external font files.
-            if family == "Helvetica":
-                if is_bold and is_italic:
-                    return "Helvetica-BoldOblique"
-                if is_bold:
-                    return "Helvetica-Bold"
-                if is_italic:
-                    return "Helvetica-Oblique"
-                return "Helvetica"
+            # variant index: 0=regular, 1=bold, 2=italic, 3=bolditalic
+            variant = 0
+            if is_bold and is_italic:
+                variant = 3
+            elif is_bold:
+                variant = 1
+            elif is_italic:
+                variant = 2
 
-            if family == "Times":
-                if is_bold and is_italic:
-                    return "Times-BoldItalic"
-                if is_bold:
-                    return "Times-Bold"
-                if is_italic:
-                    return "Times-Italic"
-                return "Times-Roman"
+            cache_key = (family, variant)
+            if cache_key in _font_cache:
+                return _font_cache[cache_key]
 
-            if family == "Courier":
-                if is_bold and is_italic:
-                    return "Courier-BoldOblique"
-                if is_bold:
-                    return "Courier-Bold"
-                if is_italic:
-                    return "Courier-Oblique"
-                return "Courier"
+            fontfile = _find_font_file(family, variant)
+            if fontfile:
+                # Use a unique internal name per variant to avoid collisions
+                internal_name = f"F{family[0]}{variant}"
+                result = (internal_name, fontfile, family)
+            else:
+                # Fallback to Base-14 (no Vietnamese support, but won't crash)
+                base14_map = {
+                    ("sans", 0): "Helvetica", ("sans", 1): "Helvetica-Bold",
+                    ("sans", 2): "Helvetica-Oblique", ("sans", 3): "Helvetica-BoldOblique",
+                    ("serif", 0): "Times-Roman", ("serif", 1): "Times-Bold",
+                    ("serif", 2): "Times-Italic", ("serif", 3): "Times-BoldItalic",
+                    ("mono", 0): "Courier", ("mono", 1): "Courier-Bold",
+                    ("mono", 2): "Courier-Oblique", ("mono", 3): "Courier-BoldOblique",
+                }
+                result = (base14_map.get(cache_key, "Helvetica"), None, family)
 
-            return "Helvetica"
+            _font_cache[cache_key] = result
+            return result
 
-        def _insert_text_fit(page, rect, text, *, fontname, fontsize, color):
-            # insert_textbox() returns a non-negative value if text fits, negative if it doesn't.
-            # We reduce font size until it fits (down to 4pt).
+        def _insert_text_fit(page, rect, text, *, fontname, fontfile, fontsize, color):
+            """Insert text at rect position. Try textbox first; fall back to insert_text."""
             fs0 = int(max(4, round(float(fontsize))))
+            # Try insert_textbox (wraps text within bounds)
             for fs in range(fs0, 3, -1):
                 try:
-                    rc = page.insert_textbox(
-                        rect,
-                        text,
-                        fontsize=fs,
-                        fontname=fontname,
-                        color=color,
-                        align=0,  # left
-                    )
+                    kwargs = dict(fontsize=fs, fontname=fontname, color=color, align=0)
+                    if fontfile:
+                        kwargs["fontfile"] = fontfile
+                    rc = page.insert_textbox(rect, text, **kwargs)
                     if rc >= 0:
                         return True
                 except Exception:
-                    # Fallback to built-in Helvetica if the font isn't usable.
                     try:
                         rc = page.insert_textbox(
-                            rect,
-                            text,
-                            fontsize=fs,
-                            fontname="Helvetica",
-                            color=color,
-                            align=0,
+                            rect, text, fontsize=fs, fontname="Helvetica",
+                            color=color, align=0,
                         )
                         if rc >= 0:
                             return True
                     except Exception:
                         continue
-            return False
+            # Fallback: point-based insert_text (won't clip but may overflow to the right)
+            try:
+                baseline_y = rect.y1 - 1
+                kwargs = dict(fontsize=fs0, fontname=fontname, color=color)
+                if fontfile:
+                    kwargs["fontfile"] = fontfile
+                page.insert_text(fitz.Point(rect.x0, baseline_y), text, **kwargs)
+                return True
+            except Exception:
+                try:
+                    page.insert_text(
+                        fitz.Point(rect.x0, rect.y1 - 1), text,
+                        fontsize=fs0, fontname="Helvetica", color=color,
+                    )
+                    return True
+                except Exception:
+                    return False
 
         doc = fitz.open(file_path)
         try:
@@ -314,40 +371,108 @@ class FileService:
                 if not items:
                     continue
 
-                # IMPORTANT: Do NOT use PDF redactions here.
-                # Redaction permanently removes ANY content under the rectangle (including table/grid lines),
-                # which is the main reason for "bảng bị mất nét".
-                # Instead, we overlay small white rectangles only over the original glyph span boxes.
-                pad_x = 0.6  # points; keep tight to avoid covering nearby strokes
-                pad_y = 0.2  # smaller Y padding helps preserve table/grid lines
+                # ── Bilingual newline: keep original, insert translation below ──
+                if bi_mode == 'newline':
+                    for idx, (rect, _span_rects, src, style) in enumerate(items, start=1):
+                        try:
+                            dst = _translate_preserve_ws(src)
+                        except ProviderRateLimitError:
+                            raise
+                        except Exception:
+                            dst = ""
+                        if not str(dst).strip():
+                            continue
+
+                        fontname, fontfile, _family = _resolve_font(style)
+                        fontsize = style.get("size") or 10
+                        # Use a slightly smaller font and blue color to distinguish.
+                        trans_fs = max(4, fontsize - 1)
+                        trans_color = (0.0, 0.0, 0.8)  # blue for translated text
+                        # Place translated text right below the original line.
+                        # insert_text uses baseline point (not a bounding rect),
+                        # so it works even when the text span is narrow.
+                        baseline_y = rect.y1 + trans_fs + 1
+                        kwargs = dict(fontsize=trans_fs, fontname=fontname, color=trans_color)
+                        if fontfile:
+                            kwargs["fontfile"] = fontfile
+                        try:
+                            page.insert_text(fitz.Point(rect.x0, baseline_y), str(dst), **kwargs)
+                        except Exception:
+                            try:
+                                page.insert_text(
+                                    fitz.Point(rect.x0, baseline_y), str(dst),
+                                    fontsize=trans_fs, fontname="Helvetica", color=trans_color,
+                                )
+                            except Exception:
+                                pass
+
+                        if progress_callback and idx % 40 == 0:
+                            pct = int(5 + ((page_index + (idx / max(1, len(items)))) / max(1, total_pages)) * 90)
+                            progress_callback(min(98, pct), f"PDF: translating page {page_index+1}/{total_pages} ({idx}/{len(items)} lines)")
+                    continue  # skip normal redact+insert for this page
+
+                # ── Remove original text using redaction (preserves table borders) ──
                 for _line_rect, span_rects, _src, _style in items:
                     for r in span_rects:
-                        rr = fitz.Rect(r.x0 - pad_x, r.y0 - pad_y, r.x1 + pad_x, r.y1 + pad_y)
                         try:
-                            # fill-only to avoid drawing a white stroke that can cut through thin lines
-                            page.draw_rect(rr, color=None, fill=(1, 1, 1), overlay=True, width=0)
+                            page.add_redact_annot(r, fill=False)
                         except Exception:
                             pass
 
-                # Insert translated text back into the same boxes.
+                try:
+                    page.apply_redactions(
+                        images=fitz.PDF_REDACT_IMAGE_NONE,
+                        graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+                    )
+                except Exception:
+                    for _line_rect, span_rects, _src, _style in items:
+                        for r in span_rects:
+                            try:
+                                page.draw_rect(r, color=None, fill=(1, 1, 1), overlay=True, width=0)
+                            except Exception:
+                                pass
+
+                # ── Insert text back ──
                 for idx, (rect, _span_rects, src, style) in enumerate(items, start=1):
                     try:
                         dst = _translate_preserve_ws(src)
                     except ProviderRateLimitError:
-                        # bubble up for the outer job handler
                         raise
                     except Exception:
-                        # If one line fails, keep original box empty rather than failing the whole PDF.
                         dst = ""
 
                     if not str(dst).strip():
                         continue
 
-                    fontname = _choose_builtin_font(style)
+                    fontname, fontfile, _family = _resolve_font(style)
                     fontsize = style.get("size") or 10
                     color = _int_color_to_rgb01(style.get("color") or 0)
 
-                    _insert_text_fit(page, rect, str(dst), fontname=fontname, fontsize=fontsize, color=color)
+                    if bi_mode == 'inline':
+                        # Song ngữ liền kề: "Original <delim> Translated"
+                        # Use insert_text (point-based) so it doesn't clip in narrow cells.
+                        display_text = self._join_inline_bilingual(src.strip(), str(dst).strip(), bi_delim)
+                        # Baseline position: near the bottom of the line rect
+                        baseline_y = rect.y1 - 1
+                        best_fs = int(max(4, round(float(fontsize))))
+                        kwargs = dict(fontname=fontname, color=color)
+                        if fontfile:
+                            kwargs["fontfile"] = fontfile
+                        try:
+                            page.insert_text(fitz.Point(rect.x0, baseline_y), display_text, fontsize=best_fs, **kwargs)
+                        except Exception:
+                            try:
+                                page.insert_text(
+                                    fitz.Point(rect.x0, baseline_y), display_text,
+                                    fontsize=best_fs, fontname="Helvetica", color=color,
+                                )
+                            except Exception:
+                                pass
+                    else:
+                        # Normal mode: only translated text, use textbox for fit
+                        _insert_text_fit(page, rect, str(dst),
+                                         fontname=fontname, fontfile=fontfile,
+                                         fontsize=fontsize, color=color)
 
                     if progress_callback and idx % 40 == 0:
                         pct = int(5 + ((page_index + (idx / max(1, len(items)))) / max(1, total_pages)) * 90)
@@ -392,6 +517,60 @@ class FileService:
     def _process_docx(self, file_path, target_lang, progress_callback=None, *, ocr_images=False, ocr_langs=None, ocr_mode=None, bilingual_mode=None, bilingual_delimiter=None):
         # Modify original document in-place so styles/images/relationships are preserved
         doc = docx.Document(file_path)
+
+        # ── Ensure table borders are explicitly set in XML ──
+        # python-docx preserves existing XML, but tables whose borders rely
+        # solely on a style definition can lose their borders when runs/paragraphs
+        # are modified. Stamp explicit <w:tblBorders> and <w:tcBorders> from
+        # the style into the table/cell properties so they survive the save.
+        try:
+            from docx.oxml import OxmlElement
+            from docx.oxml.ns import qn as _qn
+            import copy as _copy
+
+            def _ensure_table_borders(table):
+                tbl = table._tbl
+                tblPr = tbl.find(_qn('w:tblPr'))
+                if tblPr is None:
+                    tblPr = OxmlElement('w:tblPr')
+                    tbl.insert(0, tblPr)
+
+                # If the table already has explicit borders, keep them.
+                existing_borders = tblPr.find(_qn('w:tblBorders'))
+                if existing_borders is None:
+                    # Add default single-line borders so tables never look empty
+                    borders = OxmlElement('w:tblBorders')
+                    for edge in ('top', 'left', 'bottom', 'right', 'insideH', 'insideV'):
+                        el = OxmlElement(f'w:{edge}')
+                        el.set(_qn('w:val'), 'single')
+                        el.set(_qn('w:sz'), '4')
+                        el.set(_qn('w:space'), '0')
+                        el.set(_qn('w:color'), 'auto')
+                        borders.append(el)
+                    tblPr.append(borders)
+
+                # Stamp cell borders on every cell that lacks them
+                for row in tbl.findall(_qn('w:tr')):
+                    for tc in row.findall(_qn('w:tc')):
+                        tcPr = tc.find(_qn('w:tcPr'))
+                        if tcPr is None:
+                            tcPr = OxmlElement('w:tcPr')
+                            tc.insert(0, tcPr)
+                        if tcPr.find(_qn('w:tcBorders')) is None:
+                            cb = OxmlElement('w:tcBorders')
+                            for edge in ('top', 'left', 'bottom', 'right'):
+                                el = OxmlElement(f'w:{edge}')
+                                el.set(_qn('w:val'), 'single')
+                                el.set(_qn('w:sz'), '4')
+                                el.set(_qn('w:space'), '0')
+                                el.set(_qn('w:color'), 'auto')
+                                cb.append(el)
+                            tcPr.append(cb)
+
+            for table in doc.tables:
+                _ensure_table_borders(table)
+        except Exception:
+            pass
 
         api_only = str(os.getenv('AI_DISABLE_FALLBACK', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
 
@@ -718,13 +897,10 @@ class FileService:
                 return png_bytes
 
         def _apply_translation_to_runs(paragraph, translated_text):
-            """Apply translated paragraph text with minimal layout drift.
+            """Apply translated text when all runs share the same formatting.
 
-            Instead of distributing text across all runs (which often causes
-            severe spacing/kerning artifacts), write into a single primary run
-            and clear textual content of the others.
-            Also strips forced-caps XML attributes (w:caps, w:smallCaps) so
-            the translated text displays in its natural casing.
+            Used when paragraph was translated as one unit (uniform formatting).
+            Strips forced-caps XML attributes (w:caps, w:smallCaps).
             """
             from docx.oxml.ns import qn as _qn
             runs = list(paragraph.runs)
@@ -732,28 +908,133 @@ class FileService:
                 paragraph.add_run(translated_text or "")
                 return
 
-            primary_idx = 0
-            for i, run in enumerate(runs):
-                if (run.text or '').strip():
-                    primary_idx = i
-                    break
-
-            for i, run in enumerate(runs):
+            # Strip forced-caps from all runs
+            for run in runs:
                 try:
-                    # Remove forced-caps attributes that turn lowercase into uppercase
                     rPr = run._element.find(_qn('w:rPr'))
                     if rPr is not None:
                         for caps_tag in ('w:caps', 'w:smallCaps'):
                             el = rPr.find(_qn(caps_tag))
                             if el is not None:
                                 rPr.remove(el)
-                    if i == primary_idx:
-                        run.text = translated_text or ""
-                    else:
-                        # Only clear textual content; keep run object/style in place.
-                        run.text = ""
                 except Exception:
                     continue
+
+            # Find first run with content
+            primary_idx = 0
+            for i, run in enumerate(runs):
+                if (run.text or '').strip():
+                    primary_idx = i
+                    break
+
+            runs[primary_idx].text = translated_text or ""
+            for i, r in enumerate(runs):
+                if i != primary_idx:
+                    r.text = ""
+
+        def _get_run_format_key(run):
+            """Return a hashable key representing this run's formatting (rPr XML)."""
+            from docx.oxml.ns import qn as _qn
+            try:
+                from lxml import etree
+                rPr = run._element.find(_qn('w:rPr'))
+                if rPr is not None:
+                    # Use plain tostring (c14n2 fails on OOXML namespaces)
+                    return etree.tostring(rPr)
+                return b''
+            except Exception:
+                return b''
+
+        def _group_runs_by_format(runs):
+            """Group consecutive runs with the same formatting.
+
+            Returns list of (format_key, [run_indices]).
+            Whitespace-only runs are merged into the preceding group.
+            """
+            groups = []
+            for i, run in enumerate(runs):
+                text = run.text or ""
+                fmt = _get_run_format_key(run)
+
+                if not text.strip():
+                    # Whitespace-only: attach to current group if exists
+                    if groups:
+                        groups[-1][1].append(i)
+                    else:
+                        groups.append((fmt, [i]))
+                    continue
+
+                if groups and groups[-1][0] == fmt:
+                    groups[-1][1].append(i)
+                else:
+                    groups.append((fmt, [i]))
+            return groups
+
+        def _translate_format_groups(paragraph, translate_fn):
+            """Translate a paragraph by grouping runs with same formatting.
+
+            Each format-group is translated independently so run-level formatting
+            (bold, italic, color, font, size) is perfectly preserved.
+            """
+            from docx.oxml.ns import qn as _qn
+            runs = list(paragraph.runs)
+            if not runs:
+                return
+
+            original_texts = [(r.text or "") for r in runs]
+            paragraph_text = "".join(original_texts)
+            if not paragraph_text.strip():
+                return
+
+            groups = _group_runs_by_format(runs)
+
+            # If only one group → translate entire paragraph (better quality)
+            if len(groups) <= 1:
+                translated = translate_fn(paragraph_text)
+                _apply_translation_to_runs(paragraph, translated)
+                return
+
+            # Multiple format groups → translate each group separately
+            for fmt_key, indices in groups:
+                group_text = "".join(original_texts[i] for i in indices)
+                if not group_text.strip():
+                    continue
+
+                try:
+                    translated_group = translate_fn(group_text)
+                except ProviderRateLimitError:
+                    raise
+                except Exception as e:
+                    print(f"Format-group translation failed: {e}")
+                    if api_only:
+                        raise
+                    translated_group = group_text
+
+                # Write into first non-empty run of the group; clear others
+                written = False
+                for i in indices:
+                    run = runs[i]
+                    # Strip forced-caps
+                    try:
+                        rPr = run._element.find(_qn('w:rPr'))
+                        if rPr is not None:
+                            for caps_tag in ('w:caps', 'w:smallCaps'):
+                                el = rPr.find(_qn(caps_tag))
+                                if el is not None:
+                                    rPr.remove(el)
+                    except Exception:
+                        pass
+
+                    if not written and (original_texts[i] or "").strip():
+                        run.text = translated_group or ""
+                        written = True
+                    else:
+                        run.text = ""
+
+                if not written and indices:
+                    runs[indices[0]].text = translated_group or ""
+                    for i in indices[1:]:
+                        runs[i].text = ""
 
         # ── Helper: insert a new paragraph right after `ref_para` in the document body ──
         def _insert_paragraph_after(ref_para, text, italic=True):
@@ -939,7 +1220,12 @@ class FileService:
             return "".join(out_parts)
 
         def translate_paragraph_runs(paragraph, idx=None, total=None):
-            # Translate at paragraph-level for better quality, then map back to runs to keep formatting.
+            """Translate a paragraph, preserving per-run formatting.
+
+            Uses format-group strategy: runs with different formatting
+            (bold, italic, color …) are translated independently so each
+            retains its original style.
+            """
             runs = list(paragraph.runs)
             if not runs:
                 return
@@ -949,32 +1235,39 @@ class FileService:
             if not paragraph_text.strip():
                 return
 
-            try:
-                translated_para = _translate_preserve_form_leaders(paragraph_text)
-            except ProviderRateLimitError:
-                # Critical: if provider is rate-limited stop the entire document job
-                print("Provider rate limit detected during paragraph translation, raising to abort job.")
-                raise
-            except Exception as e:
-                print(f"Translator failed for paragraph: {e}")
-                if api_only:
+            if bi_mode == 'newline':
+                # Bilingual newline: keep original, translate full paragraph below
+                try:
+                    translated_para = _translate_preserve_form_leaders(paragraph_text)
+                except ProviderRateLimitError:
                     raise
-                translated_para = paragraph_text
-
-            if bi_mode == 'inline':
-                joined = self._join_inline_bilingual(paragraph_text, translated_para, bilingual_delimiter)
-                _apply_translation_to_runs(paragraph, joined)
-            elif bi_mode == 'newline':
-                # Avoid duplicating lines that are effectively untranslatable (e.g., dot leaders).
+                except Exception as e:
+                    print(f"Translator failed for paragraph: {e}")
+                    if api_only:
+                        raise
+                    translated_para = paragraph_text
                 if (translated_para or '').strip() != paragraph_text.strip():
-                    # Do NOT force italic; inherit formatting from the source paragraph/run.
                     new_p = _insert_paragraph_after(paragraph, translated_para, italic=False)
                     try:
                         _seen_para_elems.add(id(new_p))
                     except Exception:
                         pass
+            elif bi_mode == 'inline':
+                try:
+                    translated_para = _translate_preserve_form_leaders(paragraph_text)
+                except ProviderRateLimitError:
+                    raise
+                except Exception as e:
+                    print(f"Translator failed for paragraph: {e}")
+                    if api_only:
+                        raise
+                    translated_para = paragraph_text
+                joined = self._join_inline_bilingual(paragraph_text, translated_para, bilingual_delimiter)
+                _apply_translation_to_runs(paragraph, joined)
             else:
-                _apply_translation_to_runs(paragraph, translated_para)
+                # Normal mode: use format-group translation for best formatting preservation
+                _translate_format_groups(paragraph, _translate_preserve_form_leaders)
+
             if progress_callback and idx is not None and total is not None:
                 progress_callback(10 + int((idx / total) * 70), f"Translating paragraph {idx+1}/{total}")
 
@@ -995,53 +1288,59 @@ class FileService:
 
         # Body paragraphs
         paragraphs = [p for p in doc.paragraphs]
-        # Translate in parallel using ThreadPoolExecutor
+        # Translate body paragraphs using the format-group approach.
+        # For paragraphs with uniform formatting, translates the whole paragraph at once.
+        # For paragraphs with mixed formatting (bold, color, etc.), translates each
+        # format-group independently so each keeps its visual style.
         from concurrent.futures import as_completed
-        with self._executor_cls(max_workers=self.concurrency) as ex:
-            futures = {}
-            for idx, para in enumerate(paragraphs):
-                if _seen_or_mark(para):
-                    continue
-                paragraph_text = "".join([r.text or "" for r in para.runs])
-                if not paragraph_text.strip():
-                    continue
-                futures[ex.submit(_translate_preserve_form_leaders, paragraph_text)] = (idx, para, paragraph_text)
 
-            total_work = max(1, len(futures))
-            completed = 0
-            for fut in as_completed(list(futures.keys())):
-                try:
-                    translated = fut.result()
-                    idx, para, original_text = futures[fut]
-                    if bi_mode == 'inline':
-                        # Song ngữ liền kề: "Original  |  Translated"
-                        joined = self._join_inline_bilingual(original_text, translated, bilingual_delimiter)
-                        _apply_translation_to_runs(para, joined)
-                    elif bi_mode == 'newline':
-                        # Song ngữ xuống dòng: keep original, insert translated below
-                        if (translated or '').strip() != (original_text or '').strip():
-                            # Do NOT force italic; inherit formatting from the source paragraph/run.
-                            new_p = _insert_paragraph_after(para, translated, italic=False)
-                            try:
-                                _seen_para_elems.add(id(new_p))
-                            except Exception:
-                                pass
-                    else:
-                        # Normal: replace with translation only
-                        _apply_translation_to_runs(para, translated)
-                except ProviderRateLimitError:
-                    print("Provider rate limit detected during paragraph processing, aborting job.")
+        total_work = 0
+        completed = 0
+
+        # Count workload
+        body_paras = []
+        for para in paragraphs:
+            if _seen_or_mark(para):
+                continue
+            paragraph_text = "".join([r.text or "" for r in para.runs])
+            if not paragraph_text.strip():
+                continue
+            body_paras.append(para)
+        total_work = max(1, len(body_paras))
+
+        for para in body_paras:
+            try:
+                original_texts = [r.text or "" for r in para.runs]
+                paragraph_text = "".join(original_texts)
+
+                if bi_mode == 'inline':
+                    translated = _translate_preserve_form_leaders(paragraph_text)
+                    joined = self._join_inline_bilingual(paragraph_text, translated, bilingual_delimiter)
+                    _apply_translation_to_runs(para, joined)
+                elif bi_mode == 'newline':
+                    translated = _translate_preserve_form_leaders(paragraph_text)
+                    if (translated or '').strip() != paragraph_text.strip():
+                        new_p = _insert_paragraph_after(para, translated, italic=False)
+                        try:
+                            _seen_para_elems.add(id(new_p))
+                        except Exception:
+                            pass
+                else:
+                    # Normal: use format-group translation for best formatting preservation
+                    _translate_format_groups(para, _translate_preserve_form_leaders)
+            except ProviderRateLimitError:
+                print("Provider rate limit detected during paragraph processing, aborting job.")
+                raise
+            except Exception as e:
+                print(f"Paragraph translation failed: {e}")
+                if api_only:
                     raise
-                except Exception as e:
-                    print(f"Paragraph translation failed: {e}")
-                    if api_only:
-                        raise
-                completed += 1
-                if progress_callback:
-                    progress_callback(
-                        10 + int((completed / total_work) * 70),
-                        f"Translating paragraph {completed}/{total_work}",
-                    )
+            completed += 1
+            if progress_callback:
+                progress_callback(
+                    10 + int((completed / total_work) * 70),
+                    f"Translating paragraph {completed}/{total_work}",
+                )
 
         # Tables: translate cell-by-cell, preserve cell formatting
         for table in doc.tables:
