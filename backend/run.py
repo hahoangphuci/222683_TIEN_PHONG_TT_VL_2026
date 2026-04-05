@@ -1,6 +1,7 @@
 import os
 import sys
 import importlib.util
+import socket
 from dotenv import load_dotenv
 
 # Load .env từ thư mục backend (nơi có run.py) – bắt buộc trước khi import config hoặc TranslationService
@@ -154,6 +155,17 @@ def game_leaderboard():
     return jsonify(leaderboard)
 
 if __name__ == '__main__':
+    _port = int(os.getenv('BACKEND_PORT', '5055') or 5055)
     # Chỉ in thông tin Trang chủ để không gây lộn xộn khi khởi động
-    print("🏠 Trang chủ: http://127.0.0.1:5000")
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    print(f"Trang chu: http://127.0.0.1:{_port}")
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _sock:
+            _sock.settimeout(0.5)
+            if _sock.connect_ex(('127.0.0.1', _port)) == 0:
+                print(f"[ERROR] Port {_port} is already in use. Another backend instance is running.")
+                raise SystemExit(1)
+    except SystemExit:
+        raise
+    except OSError:
+        pass  # Socket probe failed (permission/network policy); let Flask report if port is unavailable
+    app.run(host='0.0.0.0', port=_port, debug=False, use_reloader=False)

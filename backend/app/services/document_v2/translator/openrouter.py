@@ -30,9 +30,9 @@ class OpenRouterTranslator:
         if not self.api_key:
             raise RuntimeError("OPENROUTER_API_KEY is required")
 
-        self.model = (model or os.getenv("AI_MODEL") or "gpt-4o-mini").strip()
+        self.model = (model or os.getenv("AI_MODEL") or "google/gemini-2.5-flash").strip()
         if not self.model:
-            self.model = "gpt-4o-mini"
+            self.model = "google/gemini-2.5-flash"
 
         if timeout_s is None:
             try:
@@ -69,27 +69,37 @@ class OpenRouterTranslator:
         if not core.strip():
             return src
 
-        system_prompt = (
-            "You are a professional translator. "
-            f"Translate the following text to {target_lang}.\n"
-            "RULES:\n"
-            "- Only return the translated text.\n"
-            "- Preserve line breaks exactly.\n"
-            "- Do NOT translate people's names; keep them exactly as in the source.\n"
-            "- Do NOT introduce '/' or '\\' as separators.\n"
-            "- Do not add explanations or quotes."
-        )
+        lang_direction = f"Translate the following text to {target_lang}."
         if source_lang and source_lang != "auto":
-            system_prompt = (
-                "You are a professional translator. "
-                f"Translate the following text from {source_lang} to {target_lang}.\n"
-                "RULES:\n"
-                "- Only return the translated text.\n"
-                "- Preserve line breaks exactly.\n"
-                "- Do NOT translate people's names; keep them exactly as in the source.\n"
-                "- Do NOT introduce '/' or '\\' as separators.\n"
-                "- Do not add explanations or quotes."
-            )
+            lang_direction = f"Translate the following text from {source_lang} to {target_lang}."
+
+        system_prompt = (
+            "You are an AI specialized in processing and translating PDF documents.\n"
+            f"{lang_direction}\n"
+            "PRESERVE the original PDF display structure exactly:\n"
+            "  - Exact line breaks (lines broken mid-sentence by PDF must stay broken)\n"
+            "  - Paragraph spacing\n"
+            "  - Bullet / numbering lists\n"
+            "  - Tables (keep text-table format if present)\n"
+            "  - Dot alignment in form fields (label: ......... format)\n"
+            "CRITICAL RULES:\n"
+            "  - DO NOT merge lines\n"
+            "  - DO NOT reformat or reflow paragraphs\n"
+            "  - DO NOT rewrite content\n"
+            "  - DO NOT add explanations, comments, or markdown\n"
+            "  - Output must have EXACTLY the same number of lines as input\n"
+            "DO NOT TRANSLATE:\n"
+            "  - URLs, email addresses\n"
+            "  - Code snippets\n"
+            "  - Symbols: %, $, #, {}, []\n"
+            "KEEP UNCHANGED:\n"
+            "  - Numbers and numeric data\n"
+            "  - Proper names (unless translation is standard)\n"
+            "  - Code identifiers: camelCase and PascalCase names (e.g. maSach, DocGia, themSach)\n"
+            "  - Placeholder dots (......), underscores (___), and dashes (---)\n"
+            "  - All spacing, tabs, and indentation\n"
+            "Return ONLY the translated content."
+        )
 
         payload = {
             "model": self.model,

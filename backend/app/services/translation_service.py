@@ -1,4 +1,3 @@
-import openai
 import deepl
 import os
 import threading
@@ -83,23 +82,53 @@ class TranslationService:
         # Debug: show which keys are present (do not print values). placeholders are ignored.
         print(f"TranslationService keys - DEEPL: {bool(deepl_key)}, OPENAI: {bool(openai_key)}, OPENROUTER: {bool(openrouter_key)}")
         self.deepl_translator = deepl.Translator(deepl_key) if deepl_key else None
-        
-        # Initialize OpenAI client for direct OpenAI or OpenRouter
-        if openrouter_key:
+
+        # Load OpenAI SDK lazily to avoid expensive import during module load.
+        openai_sdk = None
+        if openai_key or openrouter_key:
+            try:
+                import openai as openai_sdk  # type: ignore
+            except Exception as e:
+                print(f"OpenAI SDK import failed: {e}")
+
+        # Initialize AI client with provider preference.
+        # Default preference is OpenAI API to match the PDF pipeline requirements.
+        provider = (os.getenv('AI_PROVIDER') or 'openrouter').strip().lower()
+        self.ai_provider = provider
+        self._using_openrouter = False
+        self.openai_client = None
+
+        def _openrouter_client():
+            if not openai_sdk:
+                return None
             extra = {}
             ref = os.getenv('AI_HEADER_HTTP_REFERER') or os.getenv('HTTP_REFERER')
             if ref:
                 extra["default_headers"] = {"Referer": ref.strip()}
-            self.openai_client = openai.OpenAI(
+            self._using_openrouter = True
+            return openai_sdk.OpenAI(
                 api_key=openrouter_key,
                 base_url="https://openrouter.ai/api/v1",
                 timeout=http_timeout,
                 **extra
             )
-        elif openai_key:
-            self.openai_client = openai.OpenAI(api_key=openai_key, timeout=http_timeout)
+
+        if provider in ('openai', 'openai_api'):
+            if openai_key and openai_sdk:
+                self.openai_client = openai_sdk.OpenAI(api_key=openai_key, timeout=http_timeout)
+            elif openrouter_key:
+                self.openai_client = _openrouter_client()
+        elif provider == 'openrouter':
+            if openrouter_key:
+                self.openai_client = _openrouter_client()
+            elif openai_key and openai_sdk:
+                self.openai_client = openai_sdk.OpenAI(api_key=openai_key, timeout=http_timeout)
         else:
-            self.openai_client = None
+            # Auto fallback: prefer OpenAI key, then OpenRouter.
+            if openai_key and openai_sdk:
+                self.openai_client = openai_sdk.OpenAI(api_key=openai_key, timeout=http_timeout)
+            elif openrouter_key:
+                self.openai_client = _openrouter_client()
             
         # Pass translator callback into FileService so document processing can call
         # Provide FileService both translation and OCR hooks (used for DOCX embedded images)
@@ -112,77 +141,419 @@ class TranslationService:
         self.file_service.has_tesseract = self._is_tesseract_available()
         # Simple in-memory job store for background document processing
         self.jobs = {}  # job_id -> {status, progress, message, download_path, error}
+        # Cache for system prompt (loaded once)
+        self._system_prompt_cache = None
     
-    def _openai_translate(self, text, source_lang, target_lang, target_code):
+    def _load_system_prompt(self):
+        """Load comprehensive translation system prompt from TRANSLATION_SYSTEM_PROMPT.md file."""
+        if self._system_prompt_cache:
+            return self._system_prompt_cache
+        
+        try:
+            # Try to load from backend directory
+            prompt_path = os.path.join(_backend_dir, 'TRANSLATION_SYSTEM_PROMPT.md')
+            if os.path.exists(prompt_path):
+                with open(prompt_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                self._system_prompt_cache = content
+                return content
+        except Exception as e:
+            print(f"Failed to load TRANSLATION_SYSTEM_PROMPT.md: {e}")
+        
+        # Return None so fallback to inline prompt
+        return None
+
+    def _looks_like_instruction_echo(self, source_text, candidate_text):
+        """Detect invalid model outputs that look like prompt/instruction leakage."""
+        out = (candidate_text or '').strip()
+        if not out:
+            return True
+
+        low = out.lower()
+        src_low = (source_text or '').lower()
+        markers = (
+            'you are a professional translator',
+            'critical rules',
+            'qa checklist',
+            'preserve_layout',
+            'line_by_line',
+            'translation target',
+            'dịch từ',
+            '## ',
+        )
+        if any(m in low for m in markers) and not any(m in src_low for m in markers):
+            return True
+
+        src_len = len((source_text or '').strip())
+        out_len = len(out)
+        # Short source should not produce a very long output block.
+        if src_len > 0 and src_len <= 180 and out_len > max(450, src_len * 4):
+            return True
+
+        # Keep line structure stable for document translation chunks.
+        if out.count('\n') > (source_text or '').count('\n') + 6:
+            return True
+
+        return False
+    
+    def _get_system_prompt(self, target_name, source_name=None, *, context=None):
+        """Get system prompt combining loaded file + dynamic language info."""
+        if context == 'document_pdf_adjacent_inline':
+            target_key = (target_name or "").strip().lower()
+            target_is_vietnamese = target_key in ("vietnamese", "vi", "vi-vn", "vn", "viet")
+
+            lang_guard = ""
+            if target_is_vietnamese:
+                lang_guard = (
+                    "LANGUAGE GUARD:\n"
+                    "- If this segment is already Vietnamese, output it unchanged (or a minimal equivalent).\n"
+                    "- For mixed text, translate only non-Vietnamese parts to Vietnamese; keep Vietnamese as-is.\n"
+                )
+
+            prompt = (
+                "You are an AI specialized in PDF inline bilingual translation.\n"
+                f"TARGET LANGUAGE: {target_name}.\n"
+                "PIPELINE: The application draws: [ORIGINAL] + SEPARATOR + [YOUR OUTPUT]. "
+                "The user often chooses SEPARATOR = '|' (pipe). Your reply must be ONLY the right-hand translation "
+                "fragment—no original language, no leading pipe, no markdown, no labels like 'Translation:'.\n"
+                "Do not wrap your answer in (), [], or （）; the app adds the separator.\n\n"
+                "I. FORMAT (final PDF will look like):\n"
+                "  [source line] | [your translation]\n"
+                "  Example: Hello world | Xin chào thế giới\n\n"
+                "II. LAYOUT RULES:\n"
+                "- One PDF input line → you output for that line only; never merge content from other lines.\n"
+                "- Preserve meaning of dot leaders (....), spacing order, and field order (Name, MSSV, Email, Class, …).\n\n"
+                "III. WRAP (handled by the PDF engine, not by you):\n"
+                "- Reply as a SINGLE LINE using spaces (no newlines). The renderer wraps only the translation part and "
+                "aligns continuation under the text after '|'.\n\n"
+                "IV. FORMS / MULTI-COLUMN / LONG LINES:\n"
+                "- Keep '|' conceptually between source and translation (the app inserts it). Use concise wording per field.\n"
+                "- Translate EVERY field on the same source line (Email + Class + MSSV + …); never stop after the first field.\n"
+                "- Example: 'Name … MSSV: 123456' → 'Full Name … Student ID: 123456' (same digits).\n"
+                "- Example: 'Email: a@b.c … Lớp: CODE' → 'Email: a@b.c … Class: CODE' (same email and class code).\n\n"
+                "V. DO NOT:\n"
+                "- Omit the translation for part of the line.\n"
+                "- Stick source and translation together without leaving room for the separator (the app inserts spaces).\n\n"
+                "VI. BROKEN PDF LINES:\n"
+                "- Infer full meaning if the PDF split a sentence; still answer for this fragment only.\n\n"
+                "VII. COPY VERBATIM (still include in your output in the right place):\n"
+                "- Email addresses, URLs, numeric IDs, MSSV/student numbers, class codes, code tokens, {{ }}, %s.\n"
+                "- Translate labels (e.g. Lớp→Class) but paste the same email, numbers, and codes next to them.\n"
+                "- Keep bullets/symbol glyphs exactly as source (e.g. \uf02b, □, ■, •, →).\n"
+                "- Dot/underscore/dash runs (...., ___, ---) exactly as in the source.\n\n"
+                "VIII. FINAL CHECK (your fragment):\n"
+                "- Complete translation for the whole source fragment; no missing trailing fields.\n"
+                "IX. OCR / VARIABLE NAMES:\n"
+                "- The source text may have OCR artefacts such as stuck words "
+                "(e.g. 'Hệthống' should be 'Hệ thống'). Translate the INTENDED meaning.\n"
+                "- Code identifiers / camelCase names (maSach, maDocGia, hoTen, themSach(), …) "
+                "must be kept VERBATIM — do NOT translate them.\n"
+                "- If the source lists method signatures like 'themSach(), capNhatSach()' "
+                "keep them as-is; translate only the label (e.g. 'Hành vi:' → 'Behavior:').\n"
+                + lang_guard +
+                "Return ONLY the translated fragment."
+            )
+            if source_name:
+                prompt += f"\nSource language hint: {source_name}."
+            return prompt
+
+        if context == 'document_pdf':
+            prompt = (
+                f"Bạn là hệ thống dịch tài liệu PDF theo từng dòng (line-level) với yêu cầu GIỮ NGUYÊN BỐ CỤC.\n"
+                f"\n"
+                f"Nhiệm vụ:\n"
+                f"Dịch nội dung nhưng KHÔNG làm thay đổi chiều dài và cấu trúc dòng.\n"
+                f"\n"
+                f"NGUYÊN TẮC BẮT BUỘC:\n"
+                f"\n"
+                f"1. GIỮ NGUYÊN CẤU TRÚC DÒNG:\n"
+                f"* Không thêm dòng mới\n"
+                f"* Không gộp dòng\n"
+                f"* Không tách dòng\n"
+                f"* Output phải là 1 dòng duy nhất tương ứng với input\n"
+                f"\n"
+                f"2. KIỂM SOÁT ĐỘ DÀI:\n"
+                f"* Bản dịch phải có độ dài tương đương hoặc NGẮN HƠN bản gốc\n"
+                f"* Nếu dài hơn, phải rút gọn câu\n"
+                f"* Ưu tiên dùng từ ngắn gọn, đơn giản\n"
+                f"\n"
+                f"3. GIỮ NGUYÊN KÝ TỰ:\n"
+                f"* Giữ nguyên số, ký hiệu, dấu ngoặc, dấu chấm\n"
+                f"* Không thay đổi format như: \"()\", \":\", \"-\", \"+\", \"?\"\n"
+                f"* Không được đổi các chuỗi ký tự như '-', '+', '...', '___', '---' thành ký tự khác (đặc biệt không đổi thành '?').\n"
+                f"* Giữ nguyên ký tự bullet/checkbox như: '□', '☐', '■', '•', '▪'.\n"
+                f"\n"
+                f"4. XỬ LÝ DANH SÁCH:\n"
+                f"* Nếu dòng bắt đầu bằng bullet, số, hoặc ký hiệu → giữ nguyên phần đó\n"
+                f"* Chỉ dịch nội dung phía sau\n"
+                f"\n"
+                f"5. KHÔNG PHÁ TABLE:\n"
+                f"* Nếu dòng giống cấu trúc bảng → giữ nguyên thứ tự\n"
+                f"* Không thêm từ làm lệch cột\n"
+                f"\n"
+                f"6. KHÔNG GIẢI THÍCH:\n"
+                f"* Không thêm chú thích\n"
+                f"* Không thêm nội dung ngoài bản dịch\n"
+                f"\n"
+                f"7. TRƯỜNG HỢP ĐẶC BIỆT:\n"
+                f"* Nếu là từ chuyên ngành hoặc tên riêng → có thể giữ nguyên\n"
+                f"* Nếu dịch ra quá dài → ưu tiên viết tắt hợp lý\n"
+                f"* Không dịch tên hàm, tên biến, hoặc token code như addBook(), readerID, maSach, viewBorrowingHistory().\n"
+                f"\n"
+                f"NGÔN NGỮ ĐÍCH: {target_name}\n"
+                f"\n"
+                f"Chỉ trả về 1 dòng đã dịch, không thêm gì khác."
+            )
+            if source_name:
+                prompt += f"\nNgôn ngữ nguồn: {source_name}."
+            return prompt
+
+        if context == 'document_pdf_run_batch':
+            prompt = (
+                f"Bạn là hệ thống dịch tài liệu PDF theo từng dòng (line-level) theo dạng batch.\n"
+                f"\n"
+                f"ĐỊNH DẠNG INPUT:\n"
+                f"- Mỗi dòng có dạng: __R001__ nội dung\n"
+                f"- Có nhiều dòng trong một lần gọi\n"
+                f"\n"
+                f"YÊU CẦU BẮT BUỘC:\n"
+                f"1) Giữ nguyên số dòng và thứ tự dòng.\n"
+                f"2) Giữ nguyên tag đầu dòng (__R001__, __R002__, ...), KHÔNG đổi tag.\n"
+                f"3) Chỉ dịch phần nội dung phía sau tag.\n"
+                f"4) Không thêm dòng mới, không gộp dòng, không tách dòng.\n"
+                f"5) Mỗi dòng dịch phải ngắn gọn, độ dài tương đương hoặc ngắn hơn dòng gốc.\n"
+                f"6) Giữ nguyên số, ký hiệu, dấu ngoặc, dấu câu và format bảng/danh sách.\n"
+                f"7) Không giải thích, không thêm chú thích, không markdown.\n"
+                f"8) Không dịch tên hàm/biến/token code: addBook(), updateStock(), readerID, maSach, ...\n"
+                f"9) Nếu có token giữ chỗ ([[LB]], [[TAB]], [[CODE001]], [[ID001]], [[SYM001]], [[GLY001]]) thì PHẢI giữ nguyên token đó trong output.\n"
+                f"   (Tương thích cũ: nếu xuất hiện __LB__, __TAB__, __CODE001__, __ID001__, __SYM001__, __GLY001__ cũng phải giữ nguyên.)\n"
+                f"\n"
+                f"NGÔN NGỮ ĐÍCH: {target_name}\n"
+                f"\n"
+                f"OUTPUT: Trả về đúng các dòng đã dịch, mỗi dòng giữ nguyên tag đầu dòng."
+            )
+            if source_name:
+                prompt += f"\nNgôn ngữ nguồn: {source_name}."
+            return prompt
+
+        use_external = (os.getenv('AI_USE_EXTERNAL_SYSTEM_PROMPT') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+        if use_external:
+            prompt_file = self._load_system_prompt()
+            if prompt_file:
+                # Keep only the instruction section to avoid long prompt echo in small chunks.
+                prompt = prompt_file.split('## Ví Dụ', 1)[0].strip()
+                if len(prompt) > 3200:
+                    prompt = prompt[:3200]
+                if source_name:
+                    prompt += f"\n\nTranslate from {source_name} to {target_name}."
+                else:
+                    prompt += f"\n\nTranslate to {target_name}."
+                prompt += " Return only translated text."
+                return prompt
+
+        # Default: concise, deterministic prompt for chunk translation.
+        prompt = (
+            f"You are a professional translator. Translate to {target_name}.\n"
+            f"Return ONLY translated text.\n"
+            f"Preserve exact line breaks, spacing, tabs, bullets, numbering, punctuation, and placeholders.\n"
+            f"Do not summarize, explain, or add/remove content.\n"
+            f"Do not output instructions, headings, markdown, or notes."
+        )
+        if source_name:
+            prompt += f"\nSource language: {source_name}."
+        return prompt
+
+    @staticmethod
+    def _target_is_vietnamese(target_code: str) -> bool:
+        t = (target_code or "").strip().lower()
+        return t in ("vi", "vi-vn", "vietnamese", "vn", "viet")
+
+    @staticmethod
+    def _looks_unchanged_english_source(src: str, out: str) -> bool:
+        s = (src or "").strip()
+        d = (out or "").strip()
+        if not s or not d:
+            return False
+        if s != d:
+            return False
+        # Has alphabetic Latin text and no obvious Vietnamese diacritics.
+        if not re.search(r"[A-Za-z]", s):
+            return False
+        if re.search(r"[ăâđêôơưáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ]", s.lower()):
+            return False
+        return True
+
+    @staticmethod
+    def _adjacent_translation_incomplete(src: str, dst: str) -> bool:
+        """True nếu bản dịch song ngữ liền kề có vẻ thiếu MSSV / email / lớp so với nguồn."""
+        s = (src or "").strip()
+        d = (dst or "").strip()
+        if not s or not d:
+            return False
+        for em in re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", s):
+            if em not in d:
+                return True
+        for num in re.findall(r"\b\d{6,}\b", s):
+            if num not in d:
+                return True
+        if re.search(r"mssv", s, re.I):
+            for num in re.findall(r"\b\d{5,}\b", s):
+                if num not in d:
+                    return True
+        if re.search(r"lớp\s*:", s, re.I):
+            if not re.search(r"class\s*:", d, re.I) and not re.search(r"lớp\s*:", d, re.I):
+                if len(d) < max(24, int(len(s) * 0.42)):
+                    return True
+            m = re.search(r"lớp\s*:\s*([^\s|]+)", s, re.I)
+            if m:
+                val = m.group(1).strip().rstrip(".")
+                if len(val) >= 4 and re.search(r"[A-Za-z0-9]", val) and val not in d:
+                    return True
+        if re.search(r"họ\s*&?\s*tên|họ\s+tên", s, re.I) and re.search(r"mssv", s, re.I):
+            if not re.search(r"student\s*id|mssv", d, re.I) and not re.findall(r"\b\d{5,}\b", d):
+                return True
+        return False
+
+    def _openai_translate(self, text, source_lang, target_lang, target_code, *, context=None):
         """Dịch bằng OpenAI/OpenRouter. Dùng cho mọi ngôn ngữ (kể cả DeepL không hỗ trợ)."""
         if not self.openai_client:
             return None
         target_name = CODE_TO_NAME.get(target_code, target_lang)
-        model = os.getenv('AI_MODEL', 'gpt-3.5-turbo')
-        system_prompt = (
-            f"You are a professional translator. Translate the following text to {target_name}.\n"
-            f"IMPORTANT RULES:\n"
-            f"- Only return the translated text, nothing else.\n"
-            f"- Preserve the EXACT original casing: if the source is lowercase, keep lowercase; if uppercase, keep uppercase.\n"
-            f"- Do NOT capitalize words that were not capitalized in the original.\n"
-            f"- Preserve line breaks and paragraph structure."
+        source_name = CODE_TO_NAME.get(source_lang.lower(), source_lang) if source_lang and source_lang != 'auto' else None
+        
+        # Use comprehensive system prompt
+        system_prompt = self._get_system_prompt(target_name, source_name, context=context)
+        default_model = 'google/gemini-2.5-flash' if self._using_openrouter else 'gpt-4o-mini'
+        model = os.getenv('AI_MODEL', default_model)
+        rescue_prompt = (
+            f"Translate this text to {target_name}. Return only the translation. "
+            f"Keep line breaks and spacing exactly. No explanations."
         )
-        if source_lang and source_lang != 'auto':
-            src_name = CODE_TO_NAME.get(source_lang.lower(), source_lang)
-            system_prompt = (
-                f"You are a professional translator. Translate the following text from {src_name} to {target_name}.\n"
-                f"IMPORTANT RULES:\n"
-                f"- Only return the translated text, nothing else.\n"
-                f"- Preserve the EXACT original casing: if the source is lowercase, keep lowercase; if uppercase, keep uppercase.\n"
-                f"- Do NOT capitalize words that were not capitalized in the original.\n"
-                f"- Preserve line breaks and paragraph structure."
-            )
         try:
             try:
                 max_tokens = int(os.getenv('AI_MAX_TOKENS', '900'))
             except Exception:
                 max_tokens = 900
+            if context == 'document_pdf_adjacent_inline':
+                try:
+                    floor = int(os.getenv('AI_MAX_TOKENS_ADJACENT', '2048'))
+                except Exception:
+                    floor = 2048
+                max_tokens = max(max_tokens, max(256, floor))
+            if context == 'document_pdf_run_batch':
+                try:
+                    floor = int(os.getenv('AI_MAX_TOKENS_PDF_BATCH', '3072'))
+                except Exception:
+                    floor = 3072
+                max_tokens = max(max_tokens, max(512, floor))
             if max_tokens < 64:
                 max_tokens = 64
-            if max_tokens > 2048:
-                max_tokens = 2048
+            _tok_cap = 4096 if context in ('document_pdf_adjacent_inline', 'document_pdf_run_batch') else 2048
+            if max_tokens > _tok_cap:
+                max_tokens = _tok_cap
 
             attempt_tokens = [max_tokens]
             last_error = None
 
-            for tok in attempt_tokens:
-                try:
-                    response = self.openai_client.chat.completions.create(
-                        model=model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": text}
-                        ],
-                        max_tokens=tok,
-                        temperature=0
-                    )
-                    content = response.choices[0].message.content
-                    return (content or "").strip()
-                except Exception as inner_e:
-                    last_error = inner_e
-                    msg = str(inner_e)
-                    m = re.search(r"can only afford\s+(\d+)", msg, flags=re.IGNORECASE)
-                    if m:
-                        affordable = int(m.group(1))
-                        fallback_tok = max(64, min(affordable - 32, tok - 64))
-                        if fallback_tok >= 64 and fallback_tok < tok and fallback_tok not in attempt_tokens:
-                            attempt_tokens.append(fallback_tok)
+            for prompt in (system_prompt, rescue_prompt):
+                for tok in attempt_tokens:
+                    try:
+                        response = self.openai_client.chat.completions.create(
+                            model=model,
+                            messages=[
+                                {"role": "system", "content": prompt},
+                                {"role": "user", "content": text}
+                            ],
+                            max_tokens=tok,
+                            temperature=0
+                        )
+                        content = (response.choices[0].message.content or "").strip()
+                        if self._looks_like_instruction_echo(text, content):
+                            print("Discarded suspicious AI output (prompt/instruction echo). Retrying...")
                             continue
-                    break
+                        if (
+                            context in ('document_pdf', 'document_pdf_adjacent_inline')
+                            and self._target_is_vietnamese(target_code)
+                            and self._looks_unchanged_english_source(text, content)
+                        ):
+                            # One strict retry for unchanged English outputs in PDF flow.
+                            strict_prompt = (
+                                "Translate to Vietnamese strictly. "
+                                "If source is already Vietnamese, keep it unchanged. "
+                                "If source is non-Vietnamese, you must translate to Vietnamese. "
+                                "Return only translated text, preserving layout and spacing."
+                            )
+                            try:
+                                strict_resp = self.openai_client.chat.completions.create(
+                                    model=model,
+                                    messages=[
+                                        {"role": "system", "content": strict_prompt},
+                                        {"role": "user", "content": text}
+                                    ],
+                                    max_tokens=tok,
+                                    temperature=0,
+                                )
+                                strict_content = (strict_resp.choices[0].message.content or "").strip()
+                                if strict_content and strict_content != content and not self._looks_like_instruction_echo(text, strict_content):
+                                    content = strict_content
+                            except Exception:
+                                pass
+                        if context == "document_pdf_adjacent_inline" and self._adjacent_translation_incomplete(
+                            text, content
+                        ):
+                            try:
+                                fix_sys = (
+                                    f"You complete translations into {target_name}. The last answer dropped parts of the form line.\n"
+                                    "Reply with ONE line only (spaces, no newlines).\n"
+                                    "Include every segment from the source in order: translate labels (Name, MSSV→Student ID, "
+                                    "Lớp→Class, Email→Email) and copy every email address, student number, and class code exactly.\n"
+                                    "Do not end with a bare label; each label must be followed by its value or dot run as in the source.\n"
+                                    "Return ONLY the full translation line, nothing else."
+                                )
+                                fix_resp = self.openai_client.chat.completions.create(
+                                    model=model,
+                                    messages=[
+                                        {"role": "system", "content": fix_sys},
+                                        {
+                                            "role": "user",
+                                            "content": (
+                                                f"Source line:\n{text}\n\nIncomplete translation:\n{content}\n\n"
+                                                "Output the complete corrected translation only."
+                                            ),
+                                        },
+                                    ],
+                                    max_tokens=tok,
+                                    temperature=0,
+                                )
+                                fixed = (fix_resp.choices[0].message.content or "").strip()
+                                if fixed and not self._looks_like_instruction_echo(text, fixed):
+                                    if not self._adjacent_translation_incomplete(text, fixed):
+                                        content = fixed
+                                    elif len(fixed) > len(content) + 8:
+                                        content = fixed
+                            except Exception:
+                                pass
+                        return content
+                    except Exception as inner_e:
+                        last_error = inner_e
+                        msg = str(inner_e)
+                        m = re.search(r"can only afford\s+(\d+)", msg, flags=re.IGNORECASE)
+                        if m:
+                            affordable = int(m.group(1))
+                            fallback_tok = max(64, min(affordable - 32, tok - 64))
+                            if fallback_tok >= 64 and fallback_tok < tok and fallback_tok not in attempt_tokens:
+                                attempt_tokens.append(fallback_tok)
+                                continue
+                        break
 
             if last_error:
                 raise last_error
-            raise RuntimeError("AI translation failed with unknown error")
+            raise RuntimeError("AI translation failed: output rejected as invalid/suspicious")
         except Exception as e:
             # Surface API errors with their message so the caller can detect credit or rate issues
             raise RuntimeError(f"AI translation failed: {e}") from e
 
-    def translate_text(self, text, source_lang, target_lang):
+    def translate_text(self, text, source_lang, target_lang, context=None):
         if target_lang is None or not str(target_lang).strip():
             raise ValueError("target_lang is required")
         if text is None:
@@ -201,7 +572,7 @@ class TranslationService:
         if not self.openai_client:
             raise RuntimeError("AI provider not configured: set OPENAI_API_KEY or OPENROUTER_API_KEY in backend/.env")
         try:
-            out = self._openai_translate(text, source, target_lang, t)
+            out = self._openai_translate(text, source, target_lang, t, context=context)
             if out is not None and out != "":
                 return out
             else:
@@ -311,8 +682,7 @@ class TranslationService:
             if any(kw in main_model.lower() for kw in _KNOWN_VISION):
                 vision_model = main_model
             else:
-                # Default to a free vision model on OpenRouter
-                vision_model = 'google/gemini-2.0-flash-001'
+                vision_model = 'google/gemini-2.5-flash'
 
         # Read & encode image as base64 data-URI
         with open(image_path, 'rb') as f:
@@ -392,7 +762,7 @@ class TranslationService:
             if any(kw in main_model.lower() for kw in _KNOWN_VISION):
                 vision_model = main_model
             else:
-                vision_model = 'google/gemini-2.0-flash-001'
+                vision_model = 'google/gemini-2.5-flash'
 
         with open(image_path, 'rb') as f:
             raw = f.read()
@@ -525,7 +895,7 @@ class TranslationService:
             if any(kw in main_model.lower() for kw in _KNOWN_VISION):
                 vision_model = main_model
             else:
-                vision_model = 'google/gemini-2.0-flash-001'
+                vision_model = 'google/gemini-2.5-flash'
 
         with open(image_path, 'rb') as f:
             raw = f.read()
@@ -602,42 +972,47 @@ class TranslationService:
 
     # ── Tesseract check helper ───────────────────────────────────────────
 
-    def _is_tesseract_available(self):
-        """Return True if Tesseract OCR is installed and reachable."""
-        try:
-            import pytesseract
-        except ImportError:
-            return False
-        import shutil
+    def _resolve_tesseract_cmd(self):
+        """Resolve an executable path for Tesseract without importing pytesseract.
 
-        env_cmd = os.getenv('TESSERACT_CMD')
-        if env_cmd and str(env_cmd).strip():
-            cand = str(env_cmd).strip().strip('"')
-            if os.path.exists(cand):
-                return True
-            if shutil.which(cand):
-                return True
+        This keeps Flask startup fast/stable on Windows where importing
+        pytesseract may pull heavy deps (pandas/numpy) and slow down boot.
+        """
+        env_cmd = (os.getenv('TESSERACT_CMD') or '').strip().strip('"')
 
-        try:
-            existing = getattr(pytesseract.pytesseract, 'tesseract_cmd', None)
-            if existing and str(existing).strip():
-                if os.path.exists(str(existing).strip()) or shutil.which(str(existing).strip()):
-                    return True
-        except Exception:
-            pass
+        candidates = []
+        if env_cmd:
+            candidates.append(env_cmd)
 
-        if shutil.which('tesseract'):
-            return True
+        found_on_path = shutil.which('tesseract')
+        if found_on_path:
+            candidates.append(found_on_path)
 
         if os.name == 'nt':
-            for p in [
+            candidates.extend([
                 r"C:\Program Files\Tesseract-OCR\tesseract.exe",
                 r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
                 r"C:\Tesseract-OCR\tesseract.exe",
-            ]:
-                if os.path.exists(p):
-                    return True
-        return False
+            ])
+
+        for cand in candidates:
+            if not cand:
+                continue
+            c = str(cand).strip().strip('"')
+            if not c:
+                continue
+            if os.path.isabs(c) or c.lower().endswith('.exe'):
+                if os.path.exists(c):
+                    return c
+            else:
+                resolved = shutil.which(c)
+                if resolved:
+                    return resolved
+        return None
+
+    def _is_tesseract_available(self):
+        """Return True if Tesseract OCR executable is installed and reachable."""
+        return bool(self._resolve_tesseract_cmd())
 
     # ── Public OCR methods (auto-fallback: Tesseract → AI Vision) ────────
 
@@ -678,49 +1053,7 @@ class TranslationService:
         except Exception as e:
             raise RuntimeError("pytesseract is required for OCR. Install 'pytesseract'.") from e
 
-        import shutil
-
-        def _resolve_tesseract_cmd():
-            env_cmd = os.getenv('TESSERACT_CMD')
-            if env_cmd and str(env_cmd).strip():
-                env_cmd = str(env_cmd).strip().strip('"')
-
-            candidates = []
-            if env_cmd:
-                candidates.append(env_cmd)
-
-            try:
-                existing = getattr(pytesseract.pytesseract, 'tesseract_cmd', None)
-                if existing and str(existing).strip():
-                    candidates.append(str(existing).strip())
-            except Exception:
-                pass
-
-            found_on_path = shutil.which('tesseract')
-            if found_on_path:
-                candidates.append(found_on_path)
-
-            if os.name == 'nt':
-                candidates.extend([
-                    r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
-                    r"C:\\Program Files (x86)\\Tesseract-OCR\\tesseract.exe",
-                    r"C:\\Tesseract-OCR\\tesseract.exe",
-                ])
-
-            for cand in candidates:
-                if not cand:
-                    continue
-                cand = str(cand).strip().strip('"')
-                if os.path.isabs(cand) or cand.lower().endswith('.exe'):
-                    if os.path.exists(cand):
-                        return cand
-                else:
-                    resolved = shutil.which(cand)
-                    if resolved:
-                        return resolved
-            return None
-
-        resolved_cmd = _resolve_tesseract_cmd()
+        resolved_cmd = self._resolve_tesseract_cmd()
         if resolved_cmd:
             pytesseract.pytesseract.tesseract_cmd = resolved_cmd
         else:

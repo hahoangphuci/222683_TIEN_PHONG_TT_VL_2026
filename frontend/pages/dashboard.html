@@ -718,30 +718,36 @@
                     <select
                       id="uploadBilingualMode"
                       class="lang-select"
-                      title="Chế độ song ngữ: giữ nguyên bản gốc bên cạnh bản dịch"
+                      title="Song ngữ liền kề: mỗi dòng Gốc + ký tự ngăn + Dịch (chọn ký tự bên cạnh)"
                       data-static-options="true"
                     >
-                      <option value="none" selected>
-                        Dịch thường (chỉ bản dịch)
+                      <option value="none" selected>Dịch thường</option>
+                      <option value="preserve_layout">
+                        Song ngữ liền kề (Gốc | Dịch…)
                       </option>
-                      <option value="inline">
-                        Song ngữ liền kề (Gốc | Dịch)
-                      </option>
-                      <option value="newline">Song ngữ xuống dòng</option>
+                      <option value="line_by_line">Song ngữ xuống dòng</option>
                     </select>
                     <div class="upload-bilingual-delimiter" aria-hidden="true">
-                      <select
+                      <input
                         id="uploadBilingualDelimiter"
                         class="lang-select"
-                        title="Dấu ngăn cách khi chọn Song ngữ liền kề (Gốc <dấu> Dịch)"
+                        type="text"
+                        list="uploadBilingualDelimiterHints"
+                        maxlength="10"
+                        value="|"
+                        placeholder="|"
+                        title="Ký tự ngăn giữa bản gốc và bản dịch (PDF song ngữ liền kề)"
                         data-static-options="true"
-                      >
-                        <option value="|" selected>|</option>
-                        <option value=":">:</option>
-                        <option value="/">/</option>
-                        <option value="&#92;">&#92;</option>
-                        <option value="-">-</option>
-                      </select>
+                      />
+                      <datalist id="uploadBilingualDelimiterHints">
+                        <option value="|"></option>
+                        <option value=":"></option>
+                        <option value="/"></option>
+                        <option value="&#92;"></option>
+                        <option value="-"></option>
+                        <option value="||"></option>
+                        <option value="=>"></option>
+                      </datalist>
                     </div>
                   </div>
 

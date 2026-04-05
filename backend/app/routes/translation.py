@@ -7,7 +7,14 @@ import os
 import uuid
 
 translation_bp = Blueprint('translation', __name__)
-translation_service = TranslationService()
+translation_service = None
+
+
+def _get_translation_service():
+    global translation_service
+    if translation_service is None:
+        translation_service = TranslationService()
+    return translation_service
 
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'uploads')
 if not os.path.exists(UPLOAD_FOLDER):
@@ -16,6 +23,7 @@ if not os.path.exists(UPLOAD_FOLDER):
 @translation_bp.route('/text', methods=['POST'])
 @jwt_required(optional=True)
 def translate_text():
+    svc = _get_translation_service()
     data = request.json
     text = data.get('text')
     source_lang = data.get('source_lang', 'auto')
@@ -49,9 +57,9 @@ def translate_text():
 
     try:
         if is_html:
-            translated_text = translation_service.translate_html(text, source_lang, target_lang)
+            translated_text = svc.translate_html(text, source_lang, target_lang)
         else:
-            translated_text = translation_service.translate_text(text, source_lang, target_lang)
+            translated_text = svc.translate_text(text, source_lang, target_lang)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except RuntimeError as e:
@@ -72,6 +80,7 @@ def translate_text():
 @translation_bp.route('/document', methods=['POST'])
 @jwt_required(optional=True)
 def translate_document():
+    svc = _get_translation_service()
     if 'file' not in request.files:
         return jsonify({"error": "No file provided"}), 400
     
@@ -113,7 +122,7 @@ def translate_document():
     print(f"[translate_document] bilingual_mode={bilingual_mode!r}, bilingual_delimiter={bilingual_delimiter!r}, ext={ext}")
 
     # Start background job
-    job_id = translation_service.translate_document_background(
+    job_id = svc.translate_document_background(
         filepath, target_lang, user_id=user_id,
         ocr_images=ocr_images, ocr_langs=ocr_langs, ocr_mode=ocr_mode,
         bilingual_mode=bilingual_mode, bilingual_delimiter=bilingual_delimiter,
@@ -126,6 +135,7 @@ def translate_document():
 @jwt_required(optional=True)
 def translate_image():
     """Translate text from an uploaded image using OCR."""
+    svc = _get_translation_service()
     if 'file' not in request.files:
         return jsonify({"error": "No file provided"}), 400
 
@@ -175,7 +185,7 @@ def translate_image():
         rendered_image_data_url = None
 
         if render_overlay:
-            ocr_text, translated_text, png_bytes = translation_service.ocr_translate_overlay(
+            ocr_text, translated_text, png_bytes = svc.ocr_translate_overlay(
                 filepath,
                 source_lang=source_lang,
                 target_lang=target_lang,
@@ -186,10 +196,10 @@ def translate_image():
             import base64
             rendered_image_data_url = "data:image/png;base64," + base64.b64encode(png_bytes).decode('ascii')
         else:
-            ocr_text = translation_service.ocr_image_to_text(filepath, ocr_langs=ocr_langs)
+            ocr_text = svc.ocr_image_to_text(filepath, ocr_langs=ocr_langs)
             if not ocr_text or not str(ocr_text).strip():
                 return jsonify({"error": "OCR found no text in the image."}), 400
-            translated_text = translation_service.translate_text(ocr_text, source_lang, target_lang)
+            translated_text = svc.translate_text(ocr_text, source_lang, target_lang)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except RuntimeError as e:
@@ -224,7 +234,8 @@ def translate_image():
 @translation_bp.route('/document/status/<job_id>', methods=['GET'])
 @jwt_required(optional=True)
 def document_status(job_id):
-    job = translation_service.get_job(job_id)
+    svc = _get_translation_service()
+    job = svc.get_job(job_id)
     if not job:
         return jsonify({"error": "Job not found"}), 404
     # When completed, include download_url

@@ -441,10 +441,22 @@ function signInWithGoogle() {
   // Request authorization URL from backend
   fetch("/api/auth/google/authorize", {
     method: "POST",
+    credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
   })
-    .then((r) => r.json())
-    .then((data) => {
+    .then((r) =>
+      r.json().then((data) => ({ ok: r.ok, status: r.status, data })),
+    )
+    .then(({ ok, status, data }) => {
+      if (!ok) {
+        showAuthMessage(
+          data.message ||
+            data.error ||
+            `Không lấy được URL đăng nhập Google (HTTP ${status})`,
+          "error",
+        );
+        return;
+      }
       if (data.auth_url) {
         console.log(
           "Redirecting to Google OAuth:",

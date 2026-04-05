@@ -1102,12 +1102,14 @@ class FileUploadManager {
       if (bilingualSel && bilingualSel.value && bilingualSel.value !== "none") {
         formData.append("bilingual_mode", bilingualSel.value);
 
-        // Inline bilingual delimiter: "Original <delim> Translated"
-        if (bilingualSel.value === "inline") {
+        // Inline bilingual: Original <delimiter> Translated (delimiter from uploadBilingualDelimiter)
+        if (bilingualSel.value === "preserve_layout") {
           const delimSel = document.getElementById("uploadBilingualDelimiter");
-          if (delimSel && delimSel.value) {
-            formData.append("bilingual_delimiter", delimSel.value);
-          }
+          let delimiter = (delimSel && delimSel.value) || "|";
+          delimiter = String(delimiter).trim();
+          if (!delimiter) delimiter = "|";
+          if (delimiter.length > 10) delimiter = delimiter.slice(0, 10);
+          formData.append("bilingual_delimiter", delimiter);
         }
       }
     } catch (e) {
@@ -1144,14 +1146,60 @@ class FileUploadManager {
         const progressPercent = document.getElementById("progressPercent");
 
         const pollUrl = data.status_url;
+        let notFoundCount = 0;
+        let fetchErrorCount = 0;
+        const MAX_FETCH_ERRORS = 15;
         const interval = setInterval(async () => {
           try {
-            const statusResp = await fetch(pollUrl, {
+            let activePollUrl = pollUrl;
+            let statusResp = await fetch(activePollUrl, {
               headers: this.auth.getAuthHeaders(),
             });
-            if (!statusResp.ok) {
-              throw new Error("Failed to get status");
+
+            // If JWT is stale/invalid, retry without auth because status endpoint is optional-auth.
+            if (statusResp.status === 401 || statusResp.status === 422) {
+              statusResp = await fetch(activePollUrl);
             }
+
+            // Some deployments may expose an older status route.
+            if (
+              statusResp.status === 404 &&
+              typeof activePollUrl === "string" &&
+              activePollUrl.includes("/api/translation/document/status/")
+            ) {
+              const legacyPollUrl = activePollUrl.replace(
+                "/api/translation/document/status/",
+                "/api/translation/status/",
+              );
+              let legacyResp = await fetch(legacyPollUrl, {
+                headers: this.auth.getAuthHeaders(),
+              });
+              if (legacyResp.status === 401 || legacyResp.status === 422) {
+                legacyResp = await fetch(legacyPollUrl);
+              }
+              if (legacyResp.ok) {
+                statusResp = legacyResp;
+                activePollUrl = legacyPollUrl;
+              }
+            }
+
+            if (!statusResp.ok) {
+              if (statusResp.status === 404) {
+                notFoundCount += 1;
+                if (notFoundCount >= 3) {
+                  clearInterval(interval);
+                  UIManager.showError(
+                    "Không tìm thấy tiến trình xử lý (404). Server có thể đã khởi động lại, vui lòng upload lại file.",
+                  );
+                  document.getElementById("uploadProgress").style.display =
+                    "none";
+                  return;
+                }
+              }
+              throw new Error(`Failed to get status (${statusResp.status})`);
+            }
+            notFoundCount = 0;
+            fetchErrorCount = 0;
             const statusData = await statusResp.json();
             const p = statusData.progress || 0;
             progressFill.style.width = `${p}%`;
@@ -1232,7 +1280,18 @@ class FileUploadManager {
               }, 8000);
             }
           } catch (err) {
-            console.error("Status polling error", err);
+            fetchErrorCount++;
+            console.error(
+              `Status polling error (${fetchErrorCount}/${MAX_FETCH_ERRORS})`,
+              err,
+            );
+            if (fetchErrorCount >= MAX_FETCH_ERRORS) {
+              clearInterval(interval);
+              UIManager.showError(
+                "Mất kết nối đến server. Vui lòng kiểm tra server và thử lại.",
+              );
+              document.getElementById("uploadProgress").style.display = "none";
+            }
           }
         }, 1000);
       } else if (data.download_url) {
@@ -1880,7 +1939,7 @@ class DashboardController {
         clearFileBtn.addEventListener("click", () => this.upload.resetUpload());
       }
 
-      // Bilingual delimiter should only appear for inline mode
+      // Delimiter only for adjacent bilingual (preserve_layout → backend inline)
       const uploadBilingualModeSel = document.getElementById(
         "uploadBilingualMode",
       );
@@ -1889,12 +1948,13 @@ class DashboardController {
       );
       const syncUploadDelimiter = () => {
         if (!uploadDelimiterWrap) return;
-        const isInline =
-          uploadBilingualModeSel && uploadBilingualModeSel.value === "inline";
-        uploadDelimiterWrap.classList.toggle("is-visible", Boolean(isInline));
+        const showDelim =
+          uploadBilingualModeSel &&
+          uploadBilingualModeSel.value === "preserve_layout";
+        uploadDelimiterWrap.classList.toggle("is-visible", Boolean(showDelim));
         uploadDelimiterWrap.setAttribute(
           "aria-hidden",
-          isInline ? "false" : "true",
+          showDelim ? "false" : "true",
         );
       };
       if (uploadBilingualModeSel) {

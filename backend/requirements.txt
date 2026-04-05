@@ -20,3 +20,5 @@ Pillow==10.4.0
 opencv-python-headless>=4.10.0.0
 numpy>=2.1.0
 PyMuPDF>=1.24.0
+layoutparser==0.3.4
+reportlab==4.2.5

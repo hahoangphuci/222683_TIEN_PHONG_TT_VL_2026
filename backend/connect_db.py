@@ -96,7 +96,8 @@ def main():
     print("=" * 60)
     print("\nNext steps:")
     print("  1. Run: python run.py")
-    print("  2. Access: http://127.0.0.1:5000")
+    _bp = int(os.getenv("BACKEND_PORT", "5055") or 5055)
+    print(f"  2. Access: http://127.0.0.1:{_bp}")
     print("  3. Check MySQL: SHOW TABLES IN ai_translation;")
     
     return True

@@ -50,6 +50,24 @@ Hệ thống dịch văn bản và tài liệu sử dụng trí tuệ nhân tạ
 - **Container**: Docker & Docker Compose
 - **Payment**: SePay.vn integration
 
+### PDF Pipeline (theo cấu hình khuyến nghị)
+
+- Đọc PDF: `PyMuPDF`
+- Layout: `layoutparser`
+- OCR: `Tesseract` (`pytesseract`)
+- Dịch AI: `OpenAI API`
+- Render PDF: `reportlab` (tuỳ chọn, bật qua biến môi trường)
+
+Biến môi trường liên quan:
+
+```env
+# Ưu tiên OpenAI API cho dịch
+AI_PROVIDER=openai
+
+# Render engine cho PDF: pymupdf | reportlab
+PDF_RENDER_ENGINE=pymupdf
+```
+
 ## 🚀 Cài Đặt & Chạy
 
 ### Yêu cầu hệ thống

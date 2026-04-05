@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, redirect, session
+from flask import Blueprint, request, jsonify, redirect
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 from app.models import db, User, Translation
 import google.auth.transport.requests
@@ -6,26 +6,113 @@ import google.oauth2.id_token
 import google.oauth2.service_account
 import os
 import secrets
+from pathlib import Path
+from urllib.parse import urlencode
+
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
 auth_bp = Blueprint('auth', __name__)
+
+
+def _backend_dotenv_path() -> Path:
+    # app/routes/auth.py → parents[2] = backend/
+    return Path(__file__).resolve().parents[2] / ".env"
+
+
+def _google_oauth_credentials():
+    """Lấy Client ID/Secret tin cậy cho mọi request.
+
+    Tránh lệ thuộc giá trị chụp một lần trên class `Config` (import sớm) hoặc biến môi trường
+    hệ thống rỗng chặn dotenv: đọc trực tiếp `backend/.env` nếu cần.
+    """
+    from flask import current_app
+    from dotenv import dotenv_values
+
+    cid = (
+        (os.getenv("GOOGLE_CLIENT_ID") or "").strip()
+        or (current_app.config.get("GOOGLE_CLIENT_ID") or "").strip()
+    )
+    sec = (
+        (os.getenv("GOOGLE_CLIENT_SECRET") or "").strip()
+        or (current_app.config.get("GOOGLE_CLIENT_SECRET") or "").strip()
+    )
+    if cid and sec:
+        return cid, sec
+
+    vals = {}
+    p = _backend_dotenv_path()
+    if p.is_file():
+        try:
+            vals = dotenv_values(p) or {}
+        except Exception:
+            vals = {}
+    cid = (vals.get("GOOGLE_CLIENT_ID") or cid or "").strip()
+    sec = (vals.get("GOOGLE_CLIENT_SECRET") or sec or "").strip()
+    return cid, sec
+
+_OAUTH_STATE_SALT = "google-oauth-state-v1"
+_OAUTH_STATE_MAX_AGE = 900  # 15 phút
+
+
+def _oauth_state_sign(secret: str) -> str:
+    ser = URLSafeTimedSerializer(secret, salt=_OAUTH_STATE_SALT)
+    return ser.dumps({"n": secrets.token_urlsafe(24)})
+
+
+def _oauth_state_verify(secret: str, state: str) -> bool:
+    if not state or not isinstance(state, str):
+        return False
+    ser = URLSafeTimedSerializer(secret, salt=_OAUTH_STATE_SALT)
+    try:
+        ser.loads(state, max_age=_OAUTH_STATE_MAX_AGE)
+        return True
+    except (BadSignature, SignatureExpired):
+        return False
 
 @auth_bp.route('/config', methods=['GET'])
 def auth_config():
     from flask import current_app
-    return jsonify({'google_client_id': current_app.config.get('GOOGLE_CLIENT_ID')}), 200
 
-@auth_bp.route('/google/authorize', methods=['POST'])
+    rid = current_app.config.get('GOOGLE_REDIRECT_URI') or ''
+    cid, csec = _google_oauth_credentials()
+    return jsonify({
+        'google_client_id': cid or None,
+        'google_redirect_uri': rid,
+        # True chỉ khi có cả ID và secret (secret không gửi ra ngoài, chỉ cờ)
+        'google_oauth_ready': bool(cid and csec),
+        'oauth_console_hint': (
+            'Google Cloud → APIs & Services → Credentials → OAuth 2.0 Client ID → '
+            'thêm đúng URI vào "Authorized redirect URIs". '
+            'Client secret chỉ đặt trong backend/.env (GOOGLE_CLIENT_SECRET), không để trống.'
+        ),
+    }), 200
+
+@auth_bp.route('/google/authorize', methods=['POST', 'OPTIONS'])
 def google_authorize():
     """Initiate Google OAuth flow - backend creates the authorization URL"""
     from flask import current_app
+
+    if request.method == 'OPTIONS':
+        return '', 204
     
-    client_id = current_app.config.get('GOOGLE_CLIENT_ID')
+    client_id, client_secret = _google_oauth_credentials()
     if not client_id:
         return jsonify({"error": "Google Client ID not configured"}), 500
+
+    if not client_secret:
+        return jsonify({
+            "error": "missing_client_secret",
+            "message": (
+                "Chưa cấu hình GOOGLE_CLIENT_SECRET trong backend/.env. "
+                "Google Cloud → Credentials → OAuth client (đúng Client ID) → Client secret → copy vào .env, rồi restart server."
+            ),
+        }), 500
     
-    # Generate random state for CSRF protection
-    state = secrets.token_urlsafe(32)
-    session['google_oauth_state'] = state
+    # State ký bằng SECRET_KEY — không phụ thuộc cookie session (tránh localhost vs 127.0.0.1).
+    sk = current_app.config.get('SECRET_KEY') or ''
+    if not sk:
+        return jsonify({"error": "SECRET_KEY not configured"}), 500
+    state = _oauth_state_sign(str(sk))
     
     # Use configured redirect URI to avoid Google blocking for private IPs
     redirect_uri = current_app.config.get('GOOGLE_REDIRECT_URI') or f"{request.scheme}://{request.host}/api/auth/google/callback"
@@ -33,14 +120,16 @@ def google_authorize():
     print(f"[DEBUG] Building auth URL:")
     print(f"[DEBUG]   Client ID: {client_id[:20]}...")
     print(f"[DEBUG]   Redirect URI: {redirect_uri}")
-    
+
     auth_url = (
         'https://accounts.google.com/o/oauth2/v2/auth?'
-        f'client_id={client_id}&'
-        f'redirect_uri={redirect_uri}&'
-        'response_type=code&'
-        'scope=openid%20email%20profile&'
-        f'state={state}'
+        + urlencode({
+            'client_id': client_id,
+            'redirect_uri': redirect_uri,
+            'response_type': 'code',
+            'scope': 'openid email profile',
+            'state': state,
+        })
     )
     
     print(f"[DEBUG] Full Auth URL: {auth_url[:150]}...")
@@ -62,17 +151,20 @@ def google_callback():
         return redirect(f'/auth?error={error}')
     
     if not code:
+        print(f"[WARN] OAuth callback without code; args={dict(request.args)}")
         return redirect('/auth?error=missing_code')
     
-    # Verify state for CSRF protection
-    if state != session.get('google_oauth_state'):
-        print(f"[ERROR] State mismatch: {state} != {session.get('google_oauth_state')}")
+    sk = str(current_app.config.get('SECRET_KEY') or '')
+    if not _oauth_state_verify(sk, state or ''):
+        print(f"[ERROR] OAuth state invalid or expired (signed state check failed)")
         return redirect('/auth?error=state_mismatch')
     
-    client_id = current_app.config.get('GOOGLE_CLIENT_ID')
-    client_secret = current_app.config.get('GOOGLE_CLIENT_SECRET')
-    
+    client_id, client_secret = _google_oauth_credentials()
     if not client_id or not client_secret:
+        print(
+            f"[ERROR] OAuth missing_credentials id_set={bool(client_id)} "
+            f"secret_set={bool(client_secret)}"
+        )
         return redirect('/auth?error=missing_credentials')
     
     # Exchange code for tokens using configured redirect URI
@@ -154,10 +246,13 @@ def google_auth():
         token = data.get('token')
         print(f"[DEBUG] Received token: {token[:50]}...")
         
+        gcid, _ = _google_oauth_credentials()
+        if not gcid:
+            return jsonify({"error": "Google Client ID not configured"}), 500
         idinfo = google.oauth2.id_token.verify_oauth2_token(
-            token, 
-            google.auth.transport.requests.Request(), 
-            os.getenv('GOOGLE_CLIENT_ID')
+            token,
+            google.auth.transport.requests.Request(),
+            gcid,
         )
         
         user_id = idinfo.get('sub')

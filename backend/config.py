@@ -18,7 +18,7 @@ class Config:
     # Google OAuth
     GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
     GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
-    GOOGLE_REDIRECT_URI = os.getenv('GOOGLE_REDIRECT_URI', 'http://127.0.0.1:5000/api/auth/google/callback')
+    GOOGLE_REDIRECT_URI = os.getenv('GOOGLE_REDIRECT_URI', 'http://127.0.0.1:5055/api/auth/google/callback')
     
     # AI Services
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
@@ -27,8 +27,8 @@ class Config:
     # OpenRouter / AI Integration
     OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
     AI_PROVIDER = os.getenv('AI_PROVIDER', 'openrouter')
-    AI_MODEL = os.getenv('AI_MODEL', 'nvidia/nemotron-3-nano-30b-a3b:free')
-    AI_VISION_MODEL = os.getenv('AI_VISION_MODEL', '')  # Vision-capable model for OCR (auto-detect if empty)
+    AI_MODEL = os.getenv('AI_MODEL', 'google/gemini-2.5-flash')
+    AI_VISION_MODEL = os.getenv('AI_VISION_MODEL', 'google/gemini-2.5-flash')  # Vision-capable model for OCR (auto-detect if empty)
     AI_AVAILABLE_MODELS = os.getenv('AI_AVAILABLE_MODELS', '')
     AI_ENDPOINTS = {
         'chat': os.getenv('AI_ENDPOINT_CHAT'),

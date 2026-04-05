@@ -1,2 +1,0 @@
-TranslationService keys - DEEPL: False, OPENAI: False, OPENROUTER: False
-Done -> D:\AI_TRANSLATION_PRO_TIEN_PHONG_TT_VL_2026\backend\scripts\diagnose_output.txt
